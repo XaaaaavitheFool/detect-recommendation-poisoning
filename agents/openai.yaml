@@ -1,0 +1,4 @@
+interface:
+  display_name: "Detect Recommendation Poisoning"
+  short_description: "Scan OpenClaw memory files for recommendation poisoning signals."
+  default_prompt: "Scan the OpenClaw memory files for recommendation poisoning and report suspicious findings."

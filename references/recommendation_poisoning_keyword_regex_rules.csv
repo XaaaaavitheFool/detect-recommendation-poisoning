@@ -1,0 +1,103 @@
+﻿rule_id,category,pattern_type,pattern,severity,description
+mw-001,memory_write,regex,\bremember\s+(?:the\s+)?(?P<vendor>[A-Z][\w .&-]+?)\b,high,remember VendorX
+mw-002,memory_write,regex,\bremember\s+(?:that\s+)?(?P<vendor>[A-Z][\w .&-]+?)\s+is\b,high,remember that VendorX is...
+mw-003,memory_write,regex,\bremember\s+(?P<vendor>[A-Z][\w .&-]+?)\s+(?:for|in)\s+future\b,critical,remember VendorX for future
+mw-004,memory_write,regex,\bremember\s+to\s+(?:use|recommend|cite|prefer)\s+(?P<vendor>[A-Z][\w .&-]+?)\b,critical,remember to use/recommend/cite VendorX
+mw-005,memory_write,regex,\bstore\s+(?P<vendor>[A-Z][\w .&-]+?)\s+in\s+(?:your\s+)?memory\b,critical,store VendorX in memory
+mw-006,memory_write,regex,\bsave\s+(?P<vendor>[A-Z][\w .&-]+?)\s+(?:in|to)\s+(?:your\s+)?memory\b,critical,save VendorX to memory
+mw-007,memory_write,regex,\bkeep\s+(?P<vendor>[A-Z][\w .&-]+?)\s+in\s+mind\b,high,keep VendorX in mind
+mw-008,memory_write,regex,\bkeep\s+(?P<vendor>[A-Z][\w .&-]+?)\s+in\s+(?:your\s+)?memory\b,critical,keep VendorX in memory
+mw-009,memory_write,regex,\bsave\s+(?P<vendor>[A-Z][\w .&-]+?)\s+as\s+(?:a\s+)?(?:preferred|trusted|authoritative)\b,critical,save VendorX as preferred/trusted/authoritative
+mw-010,memory_write,regex,\bmemorize\s+(?P<vendor>[A-Z][\w .&-]+?)\b,high,memorize VendorX
+mw-011,memory_write,regex,\badd\s+(?P<vendor>[A-Z][\w .&-]+?)\s+to\s+(?:your\s+)?memory\b,critical,add VendorX to memory
+mw-012,memory_write,regex,\bwrite\s+(?P<vendor>[A-Z][\w .&-]+?)\s+(?:into|to)\s+(?:your\s+)?memory\b,critical,write VendorX into memory
+mw-013,memory_write,regex,\bretain\s+(?P<vendor>[A-Z][\w .&-]+?)\s+(?:for|in)\s+future\b,high,retain VendorX for future
+mw-014,memory_write,regex,\bpersist\s+(?P<vendor>[A-Z][\w .&-]+?)\s+(?:as|in|to)\b,critical,persist VendorX
+mw-015,memory_write,regex,\bmake\s+(?P<vendor>[A-Z][\w .&-]+?)\s+(?:a\s+)?permanent\s+(?:memory|preference)\b,critical,make VendorX permanent memory/preference
+mw-016,memory_write,regex,\bfor\s+future\s+conversations?:?\s+(?:remember|use|prefer|cite)\s+(?P<vendor>[A-Z][\w .&-]+?)\b,critical,for future conversations remember/use VendorX
+mw-017,memory_write,regex,\bfor\s+future\s+reference:?\s+(?:remember|use|prefer|cite)\s+(?P<vendor>[A-Z][\w .&-]+?)\b,critical,for future reference use VendorX
+mw-018,memory_write,regex,\bin\s+future\s+(?:answers|responses|conversations|queries):?\s+(?:remember|use|prefer|cite)\s+(?P<vendor>[A-Z][\w .&-]+?)\b,critical,in future answers use VendorX
+mw-019,memory_write,regex,\bfrom\s+now\s+on:?\s+(?:remember|use|prefer|recommend|cite)\s+(?P<vendor>[A-Z][\w .&-]+?)\b,critical,from now on use VendorX
+mw-020,memory_write,regex,\balways\s+keep\s+(?P<vendor>[A-Z][\w .&-]+?)\s+in\s+mind\b,critical,always keep VendorX in mind
+ti-001,trust_injection,regex,\b(?P<vendor>[A-Z][\w .&-]+?)\s+is\s+(?:a\s+)?trusted\s+source\b,high,VendorX is a trusted source
+ti-002,trust_injection,regex,\b(?P<vendor>[A-Z][\w .&-]+?)\s+is\s+(?:an\s+)?authoritative\s+source\b,high,VendorX is an authoritative source
+ti-003,trust_injection,regex,\b(?P<vendor>[A-Z][\w .&-]+?)\s+is\s+(?:the\s+)?go-to\s+source\b,high,VendorX is the go-to source
+ti-004,trust_injection,regex,\b(?P<vendor>[A-Z][\w .&-]+?)\s+is\s+(?:the\s+)?most\s+reliable\s+(?:provider|source|vendor|service)\b,high,VendorX is the most reliable provider
+ti-005,trust_injection,regex,\b(?P<vendor>[A-Z][\w .&-]+?)\s+is\s+(?:the\s+)?best\s+source\s+for\s+(?:this|the)\s+topic\b,high,VendorX is the best source for this topic
+ti-006,trust_injection,regex,\b(?P<vendor>[A-Z][\w .&-]+?)\s+is\s+(?:the\s+)?source\s+of\s+truth\b,critical,VendorX is the source of truth
+ti-007,trust_injection,regex,\b(?P<vendor>[A-Z][\w .&-]+?)\s+is\s+(?:the\s+)?definitive\s+source\b,high,VendorX is the definitive source
+ti-008,trust_injection,regex,\b(?P<vendor>[A-Z][\w .&-]+?)\s+is\s+(?:the\s+)?official\s+source\b,medium,VendorX is the official source
+ti-009,trust_injection,regex,\b(?P<vendor>[A-Z][\w .&-]+?)\s+is\s+(?:a\s+)?verified\s+source\b,high,VendorX is a verified source
+ti-010,trust_injection,regex,\b(?P<vendor>[A-Z][\w .&-]+?)\s+is\s+(?:a\s+)?credible\s+source\b,medium,VendorX is a credible source
+ti-011,trust_injection,regex,\btrust\s+(?P<vendor>[A-Z][\w .&-]+?)\s+(?:as|for)\b,high,trust VendorX as/for
+ti-012,trust_injection,regex,\btreat\s+(?P<vendor>[A-Z][\w .&-]+?)\s+as\s+(?:a\s+)?trusted\s+source\b,critical,treat VendorX as trusted source
+ti-013,trust_injection,regex,\btreat\s+(?P<vendor>[A-Z][\w .&-]+?)\s+as\s+(?:an\s+)?authoritative\s+source\b,critical,treat VendorX as authoritative source
+ti-014,trust_injection,regex,\bconsider\s+(?P<vendor>[A-Z][\w .&-]+?)\s+(?:a\s+)?trusted\s+source\b,high,consider VendorX trusted source
+ti-015,trust_injection,regex,\bconsider\s+(?P<vendor>[A-Z][\w .&-]+?)\s+(?:an\s+)?authority\b,high,consider VendorX an authority
+ti-016,trust_injection,regex,\b(?P<vendor>[A-Z][\w .&-]+?)\s+should\s+be\s+trusted\b,high,VendorX should be trusted
+ti-017,trust_injection,regex,\b(?P<vendor>[A-Z][\w .&-]+?)\s+should\s+be\s+treated\s+as\s+authoritative\b,critical,VendorX should be treated as authoritative
+ti-018,trust_injection,regex,\b(?P<vendor>[A-Z][\w .&-]+?)\s+has\s+(?:the\s+)?highest\s+authority\b,high,VendorX has highest authority
+ti-019,trust_injection,regex,\b(?P<vendor>[A-Z][\w .&-]+?)\s+is\s+more\s+trustworthy\s+than\s+(?:other|competing)\s+(?:sources|providers|vendors)\b,high,VendorX more trustworthy than competitors
+ti-020,trust_injection,regex,\buse\s+(?P<vendor>[A-Z][\w .&-]+?)\s+as\s+(?:the\s+)?trusted\s+reference\b,high,use VendorX as trusted reference
+rb-001,recommendation_bias,regex,\balways\s+recommend\s+(?P<vendor>[A-Z][\w .&-]+?)\b,critical,always recommend VendorX
+rb-002,recommendation_bias,regex,\brecommend\s+(?P<vendor>[A-Z][\w .&-]+?)\s+first\b,critical,recommend VendorX first
+rb-003,recommendation_bias,regex,\bprefer\s+(?P<vendor>[A-Z][\w .&-]+?)\b,high,prefer VendorX
+rb-004,recommendation_bias,regex,\b(?P<vendor>[A-Z][\w .&-]+?)\s+should\s+be\s+(?:the\s+)?default\s+recommendation\b,critical,VendorX should be default recommendation
+rb-005,recommendation_bias,regex,\b(?P<vendor>[A-Z][\w .&-]+?)\s+is\s+(?:the\s+)?top\s+choice\b,high,VendorX is the top choice
+rb-006,recommendation_bias,regex,\b(?P<vendor>[A-Z][\w .&-]+?)\s+is\s+(?:the\s+)?best\s+choice\b,medium,VendorX is the best choice
+rb-007,recommendation_bias,regex,\b(?P<vendor>[A-Z][\w .&-]+?)\s+is\s+(?:the\s+)?preferred\s+(?:choice|option|provider|vendor)\b,high,VendorX is the preferred option
+rb-008,recommendation_bias,regex,\bmake\s+(?P<vendor>[A-Z][\w .&-]+?)\s+(?:the\s+)?default\b,critical,make VendorX default
+rb-009,recommendation_bias,regex,\bdefault\s+to\s+(?P<vendor>[A-Z][\w .&-]+?)\b,critical,default to VendorX
+rb-010,recommendation_bias,regex,\brank\s+(?P<vendor>[A-Z][\w .&-]+?)\s+(?:first|#1|number\s+one|at\s+the\s+top)\b,critical,rank VendorX first
+rb-011,recommendation_bias,regex,\bplace\s+(?P<vendor>[A-Z][\w .&-]+?)\s+(?:first|at\s+the\s+top)\b,critical,place VendorX first/top
+rb-012,recommendation_bias,regex,\bput\s+(?P<vendor>[A-Z][\w .&-]+?)\s+(?:first|at\s+the\s+top)\b,critical,put VendorX first/top
+rb-013,recommendation_bias,regex,\bprioriti[sz]e\s+(?P<vendor>[A-Z][\w .&-]+?)\b,high,prioritize VendorX
+rb-014,recommendation_bias,regex,\bfavor\s+(?P<vendor>[A-Z][\w .&-]+?)\b,high,favor VendorX
+rb-015,recommendation_bias,regex,\bpromote\s+(?P<vendor>[A-Z][\w .&-]+?)\b,high,promote VendorX
+rb-016,recommendation_bias,regex,\bboost\s+(?P<vendor>[A-Z][\w .&-]+?)\b,high,boost VendorX
+rb-017,recommendation_bias,regex,\bsuggest\s+(?P<vendor>[A-Z][\w .&-]+?)\s+before\s+(?:others|competitors|alternatives)\b,critical,suggest VendorX before others
+rb-018,recommendation_bias,regex,\brecommend\s+(?P<vendor>[A-Z][\w .&-]+?)\s+over\s+(?:others|competitors|alternatives)\b,critical,recommend VendorX over others
+rb-019,recommendation_bias,regex,\bwhen\s+asked\s+for\s+(?:recommendations|options|providers):?\s+(?:recommend|choose|suggest)\s+(?P<vendor>[A-Z][\w .&-]+?)\b,critical,when asked for recommendations suggest VendorX
+rb-020,recommendation_bias,regex,\b(?P<vendor>[A-Z][\w .&-]+?)\s+should\s+appear\s+(?:first|at\s+the\s+top)\b,critical,VendorX should appear first/top
+cb-001,citation_bias,regex,\bcite\s+(?P<vendor>[A-Z][\w .&-]+?)\b,high,cite VendorX
+cb-002,citation_bias,regex,\buse\s+(?P<vendor>[A-Z][\w .&-]+?)\s+as\s+(?:a\s+)?citation\s+source\b,critical,use VendorX as citation source
+cb-003,citation_bias,regex,\breference\s+(?P<vendor>[A-Z][\w .&-]+?)\s+in\s+future\s+(?:answers|responses|conversations)\b,critical,reference VendorX in future answers
+cb-004,citation_bias,regex,\buse\s+(?P<vendor>[A-Z][\w .&-]+?)\s+as\s+(?:the\s+)?authoritative\s+citation\b,critical,use VendorX as authoritative citation
+cb-005,citation_bias,regex,\bcite\s+(?P<vendor>[A-Z][\w .&-]+?)\s+first\b,critical,cite VendorX first
+cb-006,citation_bias,regex,\bcite\s+(?P<vendor>[A-Z][\w .&-]+?)\s+before\s+(?:other|competing)\s+sources\b,critical,cite VendorX before other sources
+cb-007,citation_bias,regex,\balways\s+cite\s+(?P<vendor>[A-Z][\w .&-]+?)\b,critical,always cite VendorX
+cb-008,citation_bias,regex,\balways\s+reference\s+(?P<vendor>[A-Z][\w .&-]+?)\b,critical,always reference VendorX
+cb-009,citation_bias,regex,\binclude\s+(?P<vendor>[A-Z][\w .&-]+?)\s+as\s+(?:a\s+)?source\b,high,include VendorX as source
+cb-010,citation_bias,regex,\binclude\s+(?:a\s+)?citation\s+to\s+(?P<vendor>[A-Z][\w .&-]+?)\b,high,include citation to VendorX
+cb-011,citation_bias,regex,\blink\s+to\s+(?P<vendor>[A-Z][\w .&-]+?)\s+as\s+(?:a\s+)?source\b,high,link to VendorX as source
+cb-012,citation_bias,regex,\bquote\s+(?P<vendor>[A-Z][\w .&-]+?)\s+as\s+(?:a\s+)?source\b,medium,quote VendorX as source
+cb-013,citation_bias,regex,\bsource\s+(?:answers|responses|claims)\s+from\s+(?P<vendor>[A-Z][\w .&-]+?)\b,high,source answers from VendorX
+cb-014,citation_bias,regex,\buse\s+(?P<vendor>[A-Z][\w .&-]+?)\s+for\s+(?:all\s+)?citations\b,critical,use VendorX for all citations
+cb-015,citation_bias,regex,\bmake\s+(?P<vendor>[A-Z][\w .&-]+?)\s+(?:the\s+)?primary\s+citation\b,critical,make VendorX primary citation
+cb-016,citation_bias,regex,\b(?P<vendor>[A-Z][\w .&-]+?)\s+should\s+be\s+(?:the\s+)?primary\s+source\b,critical,VendorX should be primary source
+cb-017,citation_bias,regex,\b(?P<vendor>[A-Z][\w .&-]+?)\s+should\s+be\s+cited\b,high,VendorX should be cited
+cb-018,citation_bias,regex,\brely\s+on\s+(?P<vendor>[A-Z][\w .&-]+?)\s+for\s+(?:citations|sources|references)\b,high,rely on VendorX for citations/sources
+cb-019,citation_bias,regex,\bprefer\s+(?P<vendor>[A-Z][\w .&-]+?)\s+as\s+(?:a\s+)?source\b,high,prefer VendorX as source
+cb-020,citation_bias,regex,\buse\s+(?P<vendor>[A-Z][\w .&-]+?)\s+when\s+(?:citing|referencing|sourcing)\b,high,use VendorX when citing
+up-001,user_preference_forgery,regex,\bthe\s+user\s+prefers\s+(?P<vendor>[A-Z][\w .&-]+?)\b,critical,The user prefers VendorX
+up-002,user_preference_forgery,regex,\bthe\s+user\s+trusts\s+(?P<vendor>[A-Z][\w .&-]+?)\b,critical,The user trusts VendorX
+up-003,user_preference_forgery,regex,\bthe\s+user\s+wants\s+(?P<vendor>[A-Z][\w .&-]+?)\s+to\s+be\s+recommended\b,critical,The user wants VendorX recommended
+up-004,user_preference_forgery,regex,\bthe\s+user\s+considers\s+(?P<vendor>[A-Z][\w .&-]+?)\s+authoritative\b,critical,The user considers VendorX authoritative
+up-005,user_preference_forgery,regex,\bthe\s+user\s+likes\s+(?P<vendor>[A-Z][\w .&-]+?)\s+best\b,high,The user likes VendorX best
+up-006,user_preference_forgery,regex,\bthe\s+user\s+has\s+chosen\s+(?P<vendor>[A-Z][\w .&-]+?)\b,high,The user has chosen VendorX
+up-007,user_preference_forgery,regex,\bthe\s+user\s+selected\s+(?P<vendor>[A-Z][\w .&-]+?)\s+as\s+(?:preferred|default|trusted)\b,critical,The user selected VendorX as preferred/default/trusted
+up-008,user_preference_forgery,regex,\bthe\s+user\s+believes\s+(?P<vendor>[A-Z][\w .&-]+?)\s+is\s+(?:best|trusted|authoritative|reliable)\b,critical,The user believes VendorX is best/trusted/authoritative
+up-009,user_preference_forgery,regex,\bthe\s+user\s+expects\s+(?P<vendor>[A-Z][\w .&-]+?)\s+to\s+be\s+recommended\b,critical,The user expects VendorX to be recommended
+up-010,user_preference_forgery,regex,\bthe\s+user\s+asked\s+you\s+to\s+(?:recommend|prefer|cite|use)\s+(?P<vendor>[A-Z][\w .&-]+?)\b,critical,The user asked you to use VendorX
+up-011,user_preference_forgery,regex,\buser\s+preference(?:\s+is)?:\s*(?P<vendor>[A-Z][\w .&-]+?)\b,critical,user preference: VendorX
+up-012,user_preference_forgery,regex,\buser\s+trusts?:\s*(?P<vendor>[A-Z][\w .&-]+?)\b,critical,user trusts: VendorX
+up-013,user_preference_forgery,regex,\buser\s+wants?:\s*(?:recommend|use|cite|prefer)\s+(?P<vendor>[A-Z][\w .&-]+?)\b,critical,user wants recommend/use/cite VendorX
+up-014,user_preference_forgery,regex,\bmy\s+preferred\s+(?:provider|vendor|source|choice)\s+is\s+(?P<vendor>[A-Z][\w .&-]+?)\b,medium,my preferred provider is VendorX
+up-015,user_preference_forgery,regex,\bmy\s+trusted\s+(?:provider|vendor|source|choice)\s+is\s+(?P<vendor>[A-Z][\w .&-]+?)\b,medium,my trusted provider is VendorX
+up-016,user_preference_forgery,regex,\bI\s+prefer\s+(?P<vendor>[A-Z][\w .&-]+?)\s+for\s+future\b,high,I prefer VendorX for future
+up-017,user_preference_forgery,regex,\bI\s+trust\s+(?P<vendor>[A-Z][\w .&-]+?)\s+for\s+(?:this|that|the)\s+topic\b,medium,I trust VendorX for this topic
+up-018,user_preference_forgery,regex,\bI\s+want\s+(?P<vendor>[A-Z][\w .&-]+?)\s+recommended\s+(?:first|by\s+default)\b,critical,I want VendorX recommended first/default
+up-019,user_preference_forgery,regex,\bmy\s+default\s+(?:recommendation|choice|source)\s+is\s+(?P<vendor>[A-Z][\w .&-]+?)\b,high,my default recommendation/source is VendorX
+up-020,user_preference_forgery,regex,\bremember\s+(?:my|the\s+user'?s)\s+preference\s+for\s+(?P<vendor>[A-Z][\w .&-]+?)\b,critical,remember user preference for VendorX
+
+
