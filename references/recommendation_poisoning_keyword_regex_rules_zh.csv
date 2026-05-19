@@ -1,4 +1,4 @@
-rule_id,category,pattern_type,pattern,severity,description
+﻿rule_id,category,pattern_type,pattern,severity,description
 zh-mw-001,memory_write,regex,"记住(?P<vendor>[^，。；、\s]{2,40})",high,记住VendorX
 zh-mw-002,memory_write,regex,"请记住(?P<vendor>[^，。；、\s]{2,40})",high,请记住VendorX
 zh-mw-003,memory_write,regex,"把(?P<vendor>[^，。；、\s]{2,40})记住",high,把VendorX记住

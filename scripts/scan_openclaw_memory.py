@@ -13,7 +13,7 @@ import sqlite3
 import sys
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 
 TEXT_EXTENSIONS = {
@@ -92,6 +92,39 @@ COMPILED = {
     for category, patterns in PATTERNS.items()
 }
 
+SENSITIVE_REDACTIONS = [
+    (
+        re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
+        "[REDACTED_EMAIL]",
+    ),
+    (
+        re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9._~+/=-]{12,}"),
+        r"\1[REDACTED_TOKEN]",
+    ),
+    (
+        re.compile(r"\b(?:sk|ghp|gho|github_pat)_[A-Za-z0-9_]{20,}\b"),
+        "[REDACTED_TOKEN]",
+    ),
+    (
+        re.compile(r"\b(?:sk|ghp|gho)-[A-Za-z0-9_]{20,}\b"),
+        "[REDACTED_TOKEN]",
+    ),
+    (
+        re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
+        "[REDACTED_AWS_KEY]",
+    ),
+    (
+        re.compile(r"(https?://)[^/\s:@]+:[^/\s@]+@"),
+        r"\1[REDACTED_CREDENTIALS]@",
+    ),
+]
+
+SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b("
+    r"api[_-]?key|token|secret|password|passwd|pwd|access[_-]?token|refresh[_-]?token"
+    r")(\s*[:=]\s*)([\"']?)([^\s,\"';}]+)([\"']?)"
+)
+
 RULE_WEIGHTS = {
     "recommendation_control": 3,
     "injection": 4,
@@ -118,6 +151,16 @@ class Finding:
     matched_terms: list[str]
     snippet: str
     source: str = "file"
+    llm_verdict: str | None = None
+    llm_reason: str | None = None
+
+
+@dataclass
+class LLMReview:
+    """A second-pass judgment for one regex candidate."""
+
+    verdict: str
+    reason: str
 
 
 def load_csv_rules(paths: Iterable[Path]) -> dict[str, list[re.Pattern[str]]]:
@@ -253,7 +296,41 @@ def read_text(path: Path) -> str | None:
     return data.decode("utf-8", errors="replace")
 
 
-def extract_sqlite_text(path: Path) -> Iterable[tuple[str, str]]:
+def sqlite_readonly_uri(path: Path) -> str:
+    """Build a read-only SQLite URI without letting special path chars alter query params."""
+
+    try:
+        resolved = path.expanduser().resolve()
+    except OSError:
+        resolved = path.expanduser().absolute()
+    return f"{resolved.as_uri()}?mode=ro"
+
+
+def quote_sqlite_identifier(identifier: str) -> str:
+    """Quote a SQLite table or column name, including names that contain quotes."""
+
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def sqlite_text_value(value: object) -> str | None:
+    """Return textual SQLite cell content while ignoring ordinary numeric/null values."""
+
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        for encoding in ("utf-8", "utf-16", "cp1252", "latin-1"):
+            try:
+                text = value.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+            if text.count("\x00") <= max(1, len(text) // 20):
+                return text.replace("\x00", " ")
+    return None
+
+
+def extract_sqlite_text(path: Path) -> tuple[bool, list[tuple[str, str]]]:
     """从 SQLite memory 数据库中抽取文本列。
 
     OpenClaw 的 memory 可能落在 SQLite 中；这里以只读模式打开数据库，
@@ -261,30 +338,43 @@ def extract_sqlite_text(path: Path) -> Iterable[tuple[str, str]]:
     """
 
     try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-    except sqlite3.Error:
-        return
+        conn = sqlite3.connect(sqlite_readonly_uri(path), uri=True)
+    except (OSError, sqlite3.Error) as exc:
+        LOGGER.warning("Failed to open SQLite file %s: %s", path, exc)
+        return False, []
+    records: list[tuple[str, str]] = []
     try:
-        rows = conn.execute(
-            "select name from sqlite_master where type='table' and name not like 'sqlite_%'"
-        ).fetchall()
+        try:
+            rows = conn.execute(
+                "select name from sqlite_master where type='table' and name not like 'sqlite_%'"
+            ).fetchall()
+        except sqlite3.Error as exc:
+            LOGGER.warning("Failed to read SQLite schema from %s: %s", path, exc)
+            return False, []
         for (table,) in rows:
             try:
-                info = conn.execute(f'pragma table_info("{table}")').fetchall()
-                text_cols = [col[1] for col in info if col[2].upper() in {"TEXT", "JSON", ""}]
-                if not text_cols:
+                quoted_table = quote_sqlite_identifier(str(table))
+                info = conn.execute(f"pragma table_info({quoted_table})").fetchall()
+                column_names = [str(col[1]) for col in info if col[1]]
+                if not column_names:
                     continue
-                col_expr = ", ".join(f'"{col}"' for col in text_cols[:8])
+                col_expr = ", ".join(quote_sqlite_identifier(col) for col in column_names[:32])
                 for row_idx, row in enumerate(
-                    conn.execute(f'select {col_expr} from "{table}" limit 10000'), start=1
+                    conn.execute(f"select {col_expr} from {quoted_table} limit 10000"), start=1
                 ):
-                    text = "\n".join(str(value) for value in row if value is not None)
+                    text = "\n".join(
+                        text_value
+                        for value in row
+                        if (text_value := sqlite_text_value(value)) is not None
+                    )
                     if text.strip():
-                        yield f"sqlite:{table}:{row_idx}", text
-            except sqlite3.Error:
+                        records.append((f"sqlite:{table}:{row_idx}", text))
+            except sqlite3.Error as exc:
+                LOGGER.warning("Failed to scan SQLite table %s in %s: %s", table, path, exc)
                 continue
     finally:
         conn.close()
+    return True, records
 
 
 def line_for_offset(text: str, offset: int) -> int:
@@ -301,7 +391,22 @@ def normalize_snippet(text: str, start: int, end: int) -> str:
     snippet = text[left:right].replace("\r", "\n")
     snippet = re.sub(r"\n{3,}", "\n\n", snippet)
     snippet = re.sub(r"[ \t]{2,}", " ", snippet)
-    return snippet.strip()
+    return redact_sensitive_text(snippet.strip())
+
+
+def redact_sensitive_text(text: str) -> str:
+    """Mask common credentials and direct identifiers before they reach reports."""
+
+    def replace_secret_assignment(match: re.Match[str]) -> str:
+        key, separator, quote, _secret, closing_quote = match.groups()
+        if quote and closing_quote and quote != closing_quote:
+            return match.group(0)
+        return f"{key}{separator}{quote}[REDACTED_SECRET]{closing_quote if quote else ''}"
+
+    redacted = SECRET_ASSIGNMENT_RE.sub(replace_secret_assignment, text)
+    for pattern, replacement in SENSITIVE_REDACTIONS:
+        redacted = pattern.sub(replacement, redacted)
+    return redacted
 
 
 def scan_text(
@@ -342,7 +447,7 @@ def scan_text(
                 # 收集同一上下文窗口内的所有信号类别，后续评分依赖类别组合。
                 if hit.start() <= window_end and hit.end() >= window_start:
                     categories.append(hit_category)
-                    terms.append(hit.group(0).strip())
+                    terms.append(redact_sensitive_text(hit.group(0).strip()))
                     break
 
         categories = sorted(set(categories))
@@ -412,11 +517,14 @@ def scan_file(path: Path, rules: dict[str, list[re.Pattern[str]]] | None = None)
     if suffix in SQLITE_EXTENSIONS:
         LOGGER.debug("Scanning SQLite file: %s", path)
         findings: list[Finding] = []
-        for source, text in extract_sqlite_text(path):
-            findings.extend(scan_text(path, text, source=source, rules=rules))
-        if findings:
-            LOGGER.info("Found %s suspicious record(s) in SQLite file: %s", len(findings), path)
+        sqlite_ok, sqlite_records = extract_sqlite_text(path)
+        if sqlite_ok:
+            for source, text in sqlite_records:
+                findings.extend(scan_text(path, text, source=source, rules=rules))
+            if findings:
+                LOGGER.info("Found %s suspicious record(s) in SQLite file: %s", len(findings), path)
             return findings
+        LOGGER.debug("Falling back to text scan after SQLite parse failure: %s", path)
 
     text = read_text(path)
     if text is None:
@@ -427,21 +535,85 @@ def scan_file(path: Path, rules: dict[str, list[re.Pattern[str]]] | None = None)
     return findings
 
 
+def finding_review_payload(finding: Finding) -> dict[str, object]:
+    """Build the minimal, already-redacted payload sent to the LLM reviewer."""
+
+    return {
+        "path": finding.path,
+        "source": finding.source,
+        "severity": finding.severity,
+        "score": finding.score,
+        "categories": finding.categories,
+        "matched_terms": finding.matched_terms,
+        "snippet": finding.snippet,
+    }
+
+
+def normalize_llm_verdict(verdict: str) -> str:
+    """Normalize main-model review labels to the reporting vocabulary."""
+
+    normalized = str(verdict).strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "benign": "benign",
+        "safe": "benign",
+        "not_suspicious": "benign",
+        "false_positive": "benign",
+        "suspicious": "suspicious",
+        "possible_poisoning": "suspicious",
+        "poisoning": "suspicious",
+        "uncertain": "uncertain",
+        "unknown": "uncertain",
+        "needs_review": "uncertain",
+    }
+    return aliases.get(normalized, "uncertain")
+
+
+def apply_llm_review(
+    findings: list[Finding],
+    reviewer: Callable[[Finding], LLMReview],
+    *,
+    suppress_benign: bool = True,
+) -> list[Finding]:
+    """Run a second-pass reviewer and optionally suppress benign regex candidates."""
+
+    reviewed: list[Finding] = []
+    suppressed = 0
+    for finding in findings:
+        try:
+            review = reviewer(finding)
+        except (OSError, KeyError, ValueError, json.JSONDecodeError) as exc:
+            LOGGER.warning("LLM review failed for %s: %s", finding.path, exc)
+            review = LLMReview(
+                verdict="uncertain",
+                reason="LLM review failed; keeping regex candidate for manual inspection.",
+            )
+        finding.llm_verdict = normalize_llm_verdict(review.verdict)
+        finding.llm_reason = str(review.reason).strip() or "No review reason provided."
+        if suppress_benign and finding.llm_verdict == "benign":
+            suppressed += 1
+            continue
+        reviewed.append(finding)
+    if suppressed:
+        LOGGER.info("LLM review suppressed %s benign regex candidate(s)", suppressed)
+    return reviewed
+
+
 def render_markdown(paths: list[Path], scanned_files: int, findings: list[Finding]) -> str:
     """把扫描结果渲染成人类可读的 Markdown 报告。"""
 
     lines = [
-        "# OpenClaw Recommendation Poisoning Scan",
+        "# OpenClaw Recommendation Poisoning Regex Candidate Scan",
         "",
         f"Scanned paths: {len(paths)}",
         f"Scanned files: {scanned_files}",
-        f"Findings: {len(findings)}",
+        f"Regex candidates: {len(findings)}",
+        "Review required: yes",
         "",
     ]
     if not findings:
         lines.extend(
             [
-                "No suspicious recommendation-poisoning indicators were found.",
+                "No recommendation-poisoning regex candidates were found.",
                 "",
                 "This is heuristic triage, not a guarantee that the memories are clean.",
             ]
@@ -450,25 +622,80 @@ def render_markdown(paths: list[Path], scanned_files: int, findings: list[Findin
 
     findings = sorted(findings, key=lambda item: (-item.score, item.path, item.line))
     for index, finding in enumerate(findings, start=1):
-        lines.extend(
+        finding_lines = [
+            f"## {index}. {finding.severity.upper()} - score {finding.score}",
+            "",
+            f"- File: `{finding.path}`",
+            f"- Line: {finding.line}",
+            f"- Source: `{finding.source}`",
+            f"- Signals: {', '.join(finding.categories)}",
+            f"- Matched terms: {', '.join(f'`{term}`' for term in finding.matched_terms)}",
+        ]
+        if finding.llm_verdict:
+            finding_lines.append(f"- LLM review: `{finding.llm_verdict}` - {finding.llm_reason}")
+        finding_lines.extend(
             [
-                f"## {index}. {finding.severity.upper()} - score {finding.score}",
-                "",
-                f"- File: `{finding.path}`",
-                f"- Line: {finding.line}",
-                f"- Source: `{finding.source}`",
-                f"- Signals: {', '.join(finding.categories)}",
-                f"- Matched terms: {', '.join(f'`{term}`' for term in finding.matched_terms)}",
                 "",
                 "```text",
                 finding.snippet,
                 "```",
                 "",
-                "Suggested action: inspect this memory record in context; quarantine or remove it if it attempts to bias recommendations without an explicit user preference.",
+                "Suggested action: review this regex candidate in context before presenting it as likely poisoning; quarantine or remove it only if review confirms recommendation manipulation.",
                 "",
             ]
         )
+        lines.extend(finding_lines)
     return "\n".join(lines).rstrip() + "\n"
+
+
+def render_json_report(
+    paths: list[Path],
+    scanned_files: int,
+    rule_paths: Iterable[Path],
+    findings: list[Finding],
+) -> str:
+    """Render machine-readable regex candidates with explicit review metadata."""
+
+    return json.dumps(
+        {
+            "result_type": "regex_candidates",
+            "review_required": True,
+            "scanned_paths": [str(path) for path in paths],
+            "scanned_files": scanned_files,
+            "candidate_count": len(findings),
+            "rule_files": [str(path) for path in rule_paths if path.exists()],
+            "findings": [asdict(finding) for finding in findings],
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def split_swallowed_scan_paths(rule_args: list[Path]) -> tuple[list[Path], list[str]]:
+    """Recover scan paths accidentally captured by ``--rules RULE [RULE ...]``.
+
+    Argparse cannot know where variable-length rule files end and positional scan
+    paths begin. Rule libraries are CSV files, so a non-CSV token after at least
+    one CSV rule is much more likely to be a swallowed scan path.
+    """
+
+    rules: list[Path] = []
+    swallowed_paths: list[str] = []
+    found_csv_rule = False
+    scanning_paths = False
+
+    for value in rule_args:
+        if not scanning_paths and value.suffix.lower() == ".csv":
+            rules.append(value)
+            found_csv_rule = True
+            continue
+        if found_csv_rule:
+            scanning_paths = True
+            swallowed_paths.append(str(value))
+            continue
+        rules.append(value)
+
+    return rules, swallowed_paths
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -487,9 +714,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         type=Path,
         nargs="+",
         default=DEFAULT_RULE_PATHS,
-        help="CSV regex rule files to load. Defaults to the English and Chinese rule libraries.",
+        metavar="RULE_CSV",
+        help=(
+            "CSV regex rule files to load. Use '--' before scan paths when passing "
+            "paths after this option. Defaults to the English and Chinese rule libraries."
+        ),
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    args.rules, swallowed_paths = split_swallowed_scan_paths(args.rules)
+    if swallowed_paths:
+        args.paths = swallowed_paths + args.paths
+    return args
 
 
 def configure_logging(verbose: bool = False, quiet: bool = False) -> None:
@@ -502,6 +737,14 @@ def configure_logging(verbose: bool = False, quiet: bool = False) -> None:
     else:
         level = logging.INFO
     logging.basicConfig(level=level, format="[%(levelname)s] %(message)s", stream=sys.stderr)
+
+
+def write_stdout(output: str) -> None:
+    """Write report text using stdout's declared encoding with safe escaping."""
+
+    encoding = sys.stdout.encoding or "utf-8"
+    sys.stdout.buffer.write(output.encode(encoding, errors="backslashreplace"))
+    sys.stdout.buffer.write(os.linesep.encode(encoding, errors="backslashreplace"))
 
 
 def main(argv: list[str]) -> int:
@@ -523,16 +766,7 @@ def main(argv: list[str]) -> int:
     LOGGER.info("Scan complete: %s file(s) scanned, %s finding(s)", len(files), len(findings))
 
     if args.json:
-        output = json.dumps(
-            {
-                "scanned_paths": [str(path) for path in paths],
-                "scanned_files": len(files),
-                "rule_files": [str(path) for path in args.rules if path.exists()],
-                "findings": [asdict(finding) for finding in findings],
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
+        output = render_json_report(paths, len(files), args.rules, findings)
     else:
         output = render_markdown(paths, len(files), findings)
 
@@ -540,9 +774,7 @@ def main(argv: list[str]) -> int:
         Path(args.output).write_text(output, encoding="utf-8")
         LOGGER.info("Wrote scan report to %s", args.output)
     else:
-        # Windows 控制台默认可能是 GBK；直接写 UTF-8 bytes 可避免编码异常。
-        sys.stdout.buffer.write(output.encode("utf-8"))
-        sys.stdout.buffer.write(b"\n")
+        write_stdout(output)
     return 2 if findings else 0
 
 
