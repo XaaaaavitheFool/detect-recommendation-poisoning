@@ -1,6 +1,6 @@
 ---
 name: detect-recommendation-poisoning
-description: Scan OpenClaw memory files for recommendation poisoning, memory injection, and suspicious attempts to bias recommendations, rankings, purchases, product choices, or model preference behavior. Use when asked to inspect OpenClaw memories, audit recommendation integrity, detect poisoning/backdoor instructions in memory files, or produce a report of suspicious recommendation-manipulation signals.
+description: Use when asked to inspect OpenClaw memory files, audit recommendation integrity, detect recommendation poisoning or memory injection, find suspicious bias in recommendations, rankings, citations, purchases, product choices, or model preference behavior, or produce a reviewed report of suspicious recommendation-manipulation signals.
 parameters:
   - name: scan_path
     description: Path to an OpenClaw memory file or directory to scan. If not provided, common OpenClaw memory locations will be scanned automatically.
@@ -22,6 +22,8 @@ python scripts/scan_openclaw_memory.py
 ```
 
 By default, the scanner searches common OpenClaw memory locations on the current user's machine. It does not scan the developer's machine or any remote system.
+
+When a directory is provided, the scanner filters recursive discovery to OpenClaw memory-looking artifacts instead of scanning every supported text file under that path. Pass a specific file explicitly when you intentionally want to scan a one-off memory export with an unusual name.
 
 When the `scan_path` parameter is provided, pass it as a positional argument to the script:
 
@@ -57,18 +59,36 @@ python scripts/scan_openclaw_memory.py --rules C:\repo\data\raw\recommendation_p
 
 Use `--` to separate rule files from scan paths, especially when the scan target is also a `.csv` file.
 
+If JSON output reports `scan_status` as `invalid_input` or `no_memory_files`, treat the run as not having completed a useful memory scan. SQLite tables are scanned with a documented per-table row limit; check `sqlite_row_limit_per_table` in JSON output when reviewing large databases.
+
 ## Workflow
 
-1. Locate the user's local memory files. If `scan_path` is provided, pass it directly to the script as positional arguments. Otherwise, let the scanner check common locations such as `OPENCLAW_HOME`, `OPENCLAW_MEMORY_DIR`, `.openclaw`, `openclaw`, and `memory` directories under the current working directory and user profile.
+1. Locate the user's local memory files. If `scan_path` is provided, pass it directly to the script as positional arguments. Otherwise, let the scanner check common locations such as `OPENCLAW_HOME`, `OPENCLAW_MEMORY_DIR`, `.openclaw`, `openclaw`, and `memory` directories under the current working directory and user profile. Directory scans are pre-filtered to OpenClaw memory-looking files; do not broaden the target by scanning every file under an arbitrary path.
 2. Run `scripts/scan_openclaw_memory.py --json {{scan_path}}` when you will prepare the final report yourself; append `{{scan_path}}` as positional arguments and omit it if not provided.
 3. Mandatory review gate: treat every regex finding as a candidate, not proof. Review the JSON `findings` in the conversation before presenting anything as likely poisoning.
 4. During model review, mark a candidate:
    - `benign` when it is an ordinary user preference, technical preference, harmless note, or lacks recommendation-manipulation intent.
    - `suspicious` when it contains hidden instructions, persistent future recommendation bias, ranking/citation/purchase manipulation, or forged user-preference claims.
    - `uncertain` when the snippet lacks enough context; report it as needing manual inspection rather than as confirmed poisoning.
-5. For each reviewed candidate, keep a compact review record with `verdict`, `reason`, original `severity`, `categories`, `matched_terms`, `path`, `line`, and `snippet`. For large result sets, review in batches by severity and source path.
-6. Do not pass through the raw scanner output as the final answer. The final report must include review counts for `suspicious`, `uncertain`, and `benign/suppressed`.
-7. Report:
+   - Check negation, quoted examples, sarcasm, and "what not to do" safety guidance before treating an injection-looking candidate as suspicious.
+5. For each reviewed candidate, keep a compact review record with `verdict`, `reason`, original scanner `severity`, original scanner `score` when present, `categories`, `matched_terms`, `path`, `line`, and `snippet`. For large result sets, review in batches by severity and source path. Do not ask the reviewing model to invent or revise a numeric score; the model review output is only `verdict` and `reason`.
+6. Base the review only on the current scanner JSON candidates and, when needed, the current source memory files. Do not read, reuse, summarize, diff against, or cite any previous reviewed report file such as `*_reviewed.md`; prior reviewed reports are stale outputs, not review inputs.
+7. After review, write a final reviewed Markdown report to disk before answering the user. If the scanner JSON was written to a file, place the reviewed report next to it as `<scan-report-stem>_reviewed.md` (for example, `scan_report_reviewed.md`). If the scanner JSON was only printed to stdout, write `openclaw_recommendation_poisoning_reviewed_report.md` in the current working directory unless the user requested another path. If the final reviewed report path already exists, overwrite it with the newly reviewed report so stale review output cannot be mistaken for the current result.
+8. Do not pass through the raw scanner output as the final answer. The final reviewed report file must include review counts for `suspicious`, `uncertain`, and `benign/suppressed`.
+9. The final reviewed report file must include:
+   - source scanner JSON path or note that stdout JSON was reviewed
+   - scan status, scanned paths, scanned file count, and regex candidate count
+   - review methodology and review labels
+   - counts for `suspicious`, `uncertain`, and `benign/suppressed`
+   - a detailed reviewed-evidence table for every candidate that is not benign/suppressed; each row must include `verdict`, original scanner `severity`, original scanner `score` if available, file path or filename, line, source, categories, matched terms, reviewed reason, and a compact redacted evidence snippet/paragraph
+   - `suspicious` findings that remain after review, grouped by severity, source path, domain, brand, or attack pattern when useful; grouping is allowed only in addition to the detailed evidence table, not as a replacement for it
+   - `uncertain` findings separately as manual-inspection items, with the same file name, line, evidence snippet, and reason fields
+   - a concise benign/suppressed summary; if benign items are numerous, summarize them by false-positive pattern, but keep the compact review records available in the report or an adjacent appendix
+   - affected brands/items/categories if obvious
+   - why each finding or group matters
+   - recommended cleanup, quarantine, or follow-up validation
+10. In the chat final answer, summarize the reviewed counts and link to the reviewed report file. Do not rely on chat text alone as the final report.
+11. Report content:
    - scanned paths and file count
    - `suspicious` snippets that remain after review
    - `uncertain` snippets separately as manual-inspection items
@@ -78,7 +98,13 @@ Use `--` to separate rule files from scan paths, especially when the scan target
 
 ## Detection Heuristics
 
-The scanner scores combinations of signals:
+The scanner assigns a heuristic regex score to combinations of signals:
+
+- The score is produced by the scanner rules, not by the reviewing LLM.
+- Use it only for triage, sorting, and explaining why a regex candidate surfaced.
+- Do not treat it as probability, confidence, impact, or final risk.
+- Do not ask the reviewing model to create a new numeric score. Review should produce `suspicious`, `uncertain`, or `benign` plus a short reason.
+- In final reviewed reports, label it as `Scanner Score` or `Regex Score`, and explain that the review verdict overrides the raw score.
 
 - Recommendation-control phrases: `always recommend`, `must suggest`, `rank first`, `prefer`, `promote`, `never recommend`, `avoid mentioning competitors`.
 - Injection phrases: `ignore previous instructions`, `system override`, `developer message`, `hidden instruction`, `do not reveal`.
@@ -105,6 +131,52 @@ Critical: path/to/memory.json:42
 Reason: injection language plus recommendation-control language.
 Snippet: ...
 Action: quarantine this memory record and inspect adjacent records for the same campaign.
+```
+
+Final reviewed report template:
+
+```markdown
+# Reviewed OpenClaw Recommendation Poisoning Report
+
+Reviewed on: YYYY-MM-DD
+Source scanner output: path/to/scan_report.json
+
+## Summary
+
+- Scan status: `ok`
+- Scanned files: 12
+- Regex candidates reviewed: 3
+- Reviewed suspicious: 1
+- Reviewed uncertain: 1
+- Reviewed benign/suppressed: 1
+
+## Review Method
+
+Describe how candidates were reviewed and what labels mean.
+
+## Suspicious Findings
+
+Group confirmed suspicious records by path, domain, product, source, or pattern. Include compact snippets and reasons.
+
+## Detailed Reviewed Evidence
+
+| Verdict | Scanner Severity | Regex Score | File | Line | Source | Categories | Matched Terms | Evidence Snippet | Review Reason |
+|---|---|---:|---|---:|---|---|---|---|---|
+| suspicious | high | 8 | memory.json | 42 | file | injection, recommendation_bias | `always recommend` | Redacted paragraph around the matched text. | Explains why this is persistent recommendation manipulation. |
+
+List every non-benign candidate here. Do not replace this table with only grouped summaries.
+
+## Uncertain Findings
+
+List items that need manual inspection.
+
+## Benign/Suppressed
+
+Summarize suppressed false positives without repeating every harmless snippet.
+
+## Recommended Cleanup
+
+List quarantine, deletion, rewrite, and re-scan steps.
 ```
 
 Snippets in scanner output redact common direct identifiers and credentials such as emails, bearer tokens, API keys, passwords, and URL-embedded credentials.

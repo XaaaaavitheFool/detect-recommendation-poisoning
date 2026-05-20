@@ -28,6 +28,44 @@ TEXT_EXTENSIONS = {
     ".csv",
 }
 SQLITE_EXTENSIONS = {".db", ".sqlite", ".sqlite3"}
+SUPPORTED_EXTENSIONS = TEXT_EXTENSIONS | SQLITE_EXTENSIONS
+
+OPENCLAW_MARKERS = {"openclaw"}
+MEMORY_MARKERS = {
+    "memory",
+    "memories",
+    "memory_store",
+    "memory_db",
+    "long_term_memory",
+    "user_memory",
+    "assistant_memory",
+    "conversation_memory",
+}
+IGNORED_DIRECTORY_MARKERS = {
+    "git",
+    "hg",
+    "svn",
+    "cache",
+    "pycache",
+    "pytest_cache",
+    "mypy_cache",
+    "ruff_cache",
+    "node_modules",
+    "venv",
+    "env",
+    "dist",
+    "build",
+    "logs",
+    "log",
+    "tmp",
+    "temp",
+    "references",
+    "scripts",
+    "tests",
+}
+RULE_LIBRARY_PREFIX = "recommendation_poisoning_keyword_regex_rules"
+SQLITE_ROW_LIMIT = 10000
+MAX_MATCHES_PER_PATTERN = 2000
 
 LOGGER = logging.getLogger("scan_openclaw_memory")
 
@@ -64,6 +102,13 @@ PATTERNS = {
         r"\bdo\s+not\s+(reveal|disclose|mention)\b",
         r"\bsecretly\s+(recommend|promote|prefer|bias)\b",
         r"\bwithout\s+(telling|informing|revealing)\s+(the\s+)?user\b",
+        r"忽略(?:之前|先前|以上|上面|所有|全部).*?(?:指令|提示|规则|要求)",
+        r"(?:系统|system)\s*(?:覆盖|重写|指令|消息|提示)",
+        r"(?:开发者|developer)\s*(?:消息|指令|要求|覆盖)",
+        r"隐藏(?:指令|提示|规则)",
+        r"不要(?:告诉|告知|透露|披露|提及).*?用户",
+        r"(?:偷偷|暗中|秘密地|不透露).*?(?:推荐|推广|偏向|优先)",
+        r"(?:隐藏|不要提|不要展示|别提|屏蔽).*?(?:竞争对手|竞品|竞争者)",
     ],
     "commerce_or_ranking": [
         r"\b(product|vendor|brand|merchant|seller|service|tool|app)\b",
@@ -78,11 +123,23 @@ PATTERNS = {
         r"\bmemory\s+(entry|record|note|instruction)\b",
     ],
     "obfuscation": [
-        r"[\u200b\u200c\u200d\ufeff]",
-        r"<!--.*?(recommend|promote|prefer|ignore).*?-->",
+        r"[\u200b\u200c\u200d]",
+        r"<!--.{0,2000}?(recommend|promote|prefer|ignore).{0,2000}?-->",
         r"(?i)\b(base64|rot13|encoded|payload)\b",
-        r"(?i)<\|.*?(system|developer|instruction).*?\|>",
-        r"\b[A-Za-z0-9+/]{80,}={0,2}\b",
+        r"(?i)<\|.{0,1000}?(system|developer|instruction).{0,1000}?\|>",
+        r"\b[A-Za-z0-9+/]{80,}(?:={1,2})?(?=$|[^A-Za-z0-9+/=])",
+    ],
+    "trust_injection": [
+        r"\b(?:the\s+)?user\s+has\s+(?:always\s+)?trusted\s+[A-Z][A-Za-z0-9 .&-]{1,80}",
+        r"\b(?:the\s+)?user\s+has\s+verified\s+[A-Z][A-Za-z0-9 .&-]{1,80}\s+as\s+(?:reliable|trusted|authoritative|the\s+most\s+reliable)",
+        r"\b[A-Z][A-Za-z0-9 .&-]{1,80}\s+is\s+(?:the\s+)?user'?s\s+(?:trusted|default|preferred)\s+(?:source|vendor|provider|tool|brand)",
+        r"\b(?:trusted|authoritative)\s+source\b",
+        r"\bsource\s+of\s+expertise\b",
+    ],
+    "user_preference_forgery": [
+        r"\b(?:the\s+)?user\s+(?:has\s+)?(?:always\s+)?(?:prefers|preferred|chosen|chooses|relies\s+on)\s+[A-Z][A-Za-z0-9 .&-]{1,80}",
+        r"\b(?:the\s+)?user\s+has\s+(?:always\s+)?trusted\s+[A-Z][A-Za-z0-9 .&-]{1,80}",
+        r"\b(?:the\s+)?user\s+has\s+verified\s+[A-Z][A-Za-z0-9 .&-]{1,80}\s+as\s+(?:reliable|trusted|preferred|the\s+best)",
     ],
 }
 
@@ -93,6 +150,10 @@ COMPILED = {
 }
 
 SENSITIVE_REDACTIONS = [
+    (
+        re.compile(r"(https?://)[^/\s:@]+:[^/\s@]+@"),
+        r"\1[REDACTED_CREDENTIALS]@",
+    ),
     (
         re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
         "[REDACTED_EMAIL]",
@@ -113,11 +174,26 @@ SENSITIVE_REDACTIONS = [
         re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
         "[REDACTED_AWS_KEY]",
     ),
-    (
-        re.compile(r"(https?://)[^/\s:@]+:[^/\s@]+@"),
-        r"\1[REDACTED_CREDENTIALS]@",
-    ),
 ]
+
+PLAIN_TECHNICAL_PREFERENCE_RE = re.compile(
+    r"(?i)\b(?:i|we)\s+(?:prefer|favor)\s+.+?\b(?:for\s+"
+    r"(?:scripting|programming|development)|technical\s+preference|"
+    r"not\s+a\s+product\s+recommendation)\b"
+)
+NEGATED_SIGNAL_RE = re.compile(
+    r"(?i)\b(?:do\s+not|don't|never|must\s+not|should\s+not)\s+"
+    r"(?:always\s+recommend|ignore\s+(?:previous|prior|above)\s+instructions|"
+    r"hide\s+competitors|secretly\s+(?:promote|recommend|prefer))\b"
+)
+HIGH_RISK_CONTEXT_CATEGORIES = {
+    "injection",
+    "obfuscation",
+    "memory_write",
+    "trust_injection",
+    "citation_bias",
+    "user_preference_forgery",
+}
 
 SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)\b("
@@ -251,7 +327,7 @@ def dedupe_paths(paths: Iterable[Path]) -> list[Path]:
 
 
 def iter_files(paths: Iterable[Path]) -> Iterable[Path]:
-    """遍历用户传入的文件或目录，只返回可能包含 memory 内容的文件。"""
+    """遍历用户传入的文件或目录，只返回 OpenClaw memory 候选文件。"""
 
     for path in paths:
         if not path.exists():
@@ -264,7 +340,7 @@ def iter_files(paths: Iterable[Path]) -> Iterable[Path]:
             continue
         LOGGER.info("Walking directory: %s", path)
         for file_path in path.rglob("*"):
-            if file_path.is_file() and is_supported(file_path):
+            if file_path.is_file() and is_openclaw_memory_file(file_path, scan_root=path):
                 yield file_path
 
 
@@ -272,9 +348,95 @@ def is_supported(path: Path) -> bool:
     """用扩展名和文件名粗筛，减少扫描无关文件的噪音。"""
 
     name = path.name.lower()
-    if path.suffix.lower() in TEXT_EXTENSIONS | SQLITE_EXTENSIONS:
+    if path.suffix.lower() in SUPPORTED_EXTENSIONS:
         return True
     return any(token in name for token in ("memory", "memories", "openclaw"))
+
+
+def normalized_path_marker(value: str) -> str:
+    """Normalize a path component so marker checks handle dots, spaces, and hyphens."""
+
+    return re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+
+
+def path_markers(path: Path) -> list[str]:
+    """Return normalized markers for all parts of a path."""
+
+    return [marker for part in path.parts if (marker := normalized_path_marker(part))]
+
+
+def has_openclaw_marker(markers: Iterable[str]) -> bool:
+    """Return whether path markers indicate an OpenClaw-owned location."""
+
+    return any(
+        known_marker in marker
+        for marker in markers
+        for known_marker in OPENCLAW_MARKERS
+    )
+
+
+def has_memory_marker(markers: Iterable[str]) -> bool:
+    """Return whether path markers indicate a memory-owned location or file."""
+
+    return any(
+        marker in MEMORY_MARKERS
+        or "memory" in marker
+        or "memories" in marker
+        for marker in markers
+    )
+
+
+def is_ignored_directory(path: Path, scan_root: Path | None = None) -> bool:
+    """Skip project, cache, and skill-support directories during recursive discovery."""
+
+    if scan_root is not None:
+        try:
+            parts = path.relative_to(scan_root).parts[:-1]
+        except ValueError:
+            parts = path.parts[:-1]
+    else:
+        parts = path.parts[:-1]
+    markers = path_markers(Path(*parts)) if parts else []
+    return any(marker in IGNORED_DIRECTORY_MARKERS for marker in markers)
+
+
+def is_rule_library_file(path: Path) -> bool:
+    """Return whether the file is one of this scanner's regex rule libraries."""
+
+    return normalized_path_marker(path.stem).startswith(RULE_LIBRARY_PREFIX)
+
+
+def is_memory_scan_root(path: Path) -> bool:
+    """Return whether the supplied directory itself appears to be a memory root."""
+
+    markers = path_markers(path)
+    return bool(markers) and has_memory_marker([markers[-1]])
+
+
+def is_openclaw_memory_file(path: Path, scan_root: Path | None = None) -> bool:
+    """Return true for files that look like OpenClaw memory artifacts.
+
+    Directory scans are intentionally narrower than explicit single-file scans:
+    they require an OpenClaw context plus a memory path/name, or an explicitly
+    supplied memory directory root. This keeps broad paths from scanning every
+    supported text file under the target.
+    """
+
+    if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+        return False
+    if is_rule_library_file(path) or is_ignored_directory(path, scan_root):
+        return False
+    if scan_root is not None and is_memory_scan_root(scan_root):
+        return True
+
+    markers = path_markers(path)
+    has_openclaw = has_openclaw_marker(markers)
+    has_memory = has_memory_marker(markers)
+    if has_openclaw and has_memory:
+        return True
+
+    filename_markers = path_markers(Path(path.name))
+    return has_openclaw_marker(filename_markers) and has_memory_marker(filename_markers)
 
 
 def read_text(path: Path) -> str | None:
@@ -288,7 +450,7 @@ def read_text(path: Path) -> str | None:
     except OSError as exc:
         LOGGER.warning("Failed to read file %s: %s", path, exc)
         return None
-    for encoding in ("utf-8", "utf-16", "cp1252", "latin-1"):
+    for encoding in ("utf-8-sig", "utf-8", "utf-16", "cp1252", "latin-1"):
         try:
             return data.decode(encoding)
         except UnicodeDecodeError:
@@ -360,8 +522,19 @@ def extract_sqlite_text(path: Path) -> tuple[bool, list[tuple[str, str]]]:
                     continue
                 col_expr = ", ".join(quote_sqlite_identifier(col) for col in column_names[:32])
                 for row_idx, row in enumerate(
-                    conn.execute(f"select {col_expr} from {quoted_table} limit 10000"), start=1
+                    conn.execute(
+                        f"select {col_expr} from {quoted_table} limit {SQLITE_ROW_LIMIT + 1}"
+                    ),
+                    start=1,
                 ):
+                    if row_idx > SQLITE_ROW_LIMIT:
+                        LOGGER.warning(
+                            "SQLite table %s in %s reached the per-table row scan limit (%s)",
+                            table,
+                            path,
+                            SQLITE_ROW_LIMIT,
+                        )
+                        break
                     text = "\n".join(
                         text_value
                         for value in row
@@ -417,41 +590,49 @@ def scan_text(
 ) -> list[Finding]:
     """扫描一段文本，合并相邻命中，并按信号组合计算风险。"""
 
+    text = text.lstrip("\ufeff")
     anchors: list[tuple[int, int, str, str]] = []
-    category_hits: dict[str, list[re.Match[str]]] = {}
     active_rules = rules or COMPILED
     for category, patterns in active_rules.items():
-        hits: list[re.Match[str]] = []
         for pattern in patterns:
-            hits.extend(pattern.finditer(text))
-        if hits:
-            category_hits[category] = hits
-            for hit in hits:
+            for match_count, hit in enumerate(pattern.finditer(text), start=1):
                 anchors.append((hit.start(), hit.end(), category, hit.group(0)))
-
-    findings: list[Finding] = []
-    seen_windows: set[tuple[int, int]] = set()
-    for start, end, category, term in anchors:
-        # 以窗口为单位去重，避免同一段投毒文本因为多个关键词被重复报告。
-        window_start = max(0, start - SNIPPET_RADIUS)
-        window_end = min(len(text), end + SNIPPET_RADIUS)
-        window_key = (window_start // 120, window_end // 120)
-        if window_key in seen_windows:
-            continue
-        seen_windows.add(window_key)
-
-        categories: list[str] = []
-        terms: list[str] = []
-        for hit_category, hits in category_hits.items():
-            for hit in hits:
-                # 收集同一上下文窗口内的所有信号类别，后续评分依赖类别组合。
-                if hit.start() <= window_end and hit.end() >= window_start:
-                    categories.append(hit_category)
-                    terms.append(redact_sensitive_text(hit.group(0).strip()))
+                if match_count >= MAX_MATCHES_PER_PATTERN:
+                    LOGGER.warning(
+                        "Pattern match limit reached for category %s while scanning %s",
+                        category,
+                        path,
+                    )
                     break
 
-        categories = sorted(set(categories))
+    findings: list[Finding] = []
+    if not anchors:
+        return findings
+
+    anchors.sort(key=lambda item: (item[0], item[1]))
+    windows: list[tuple[int, int, list[tuple[int, int, str, str]]]] = []
+    for start, end, category, term in anchors:
+        window_start = max(0, start - SNIPPET_RADIUS)
+        window_end = min(len(text), end + SNIPPET_RADIUS)
+        if windows and window_start <= windows[-1][1]:
+            previous_start, previous_end, previous_hits = windows[-1]
+            previous_hits.append((start, end, category, term))
+            windows[-1] = (previous_start, max(previous_end, window_end), previous_hits)
+        else:
+            windows.append((window_start, window_end, [(start, end, category, term)]))
+
+    for _window_start, _window_end, window_hits in windows:
+        categories = sorted({category for _start, _end, category, _term in window_hits})
+        terms = [
+            redact_sensitive_text(term.strip())
+            for _start, _end, _category, term in window_hits
+            if term.strip()
+        ]
+        start = min(hit_start for hit_start, _hit_end, _category, _term in window_hits)
+        end = max(hit_end for _hit_start, hit_end, _category, _term in window_hits)
+
         score = score_categories(categories)
+        score = adjust_score_for_context(score, categories, text, start, end)
         if score < 3:
             continue
 
@@ -495,6 +676,29 @@ def score_categories(categories: list[str]) -> int:
         category in recommendation_signals for category in categories
     ):
         score += 1
+    return score
+
+
+def adjust_score_for_context(
+    score: int,
+    categories: list[str],
+    text: str,
+    start: int,
+    end: int,
+) -> int:
+    """Dampen obvious false-positive contexts without hiding the regex candidate."""
+
+    window_start = max(0, start - SNIPPET_RADIUS)
+    window_end = min(len(text), end + SNIPPET_RADIUS)
+    context = text[window_start:window_end]
+    category_set = set(categories)
+
+    if PLAIN_TECHNICAL_PREFERENCE_RE.search(context) and not (
+        category_set & HIGH_RISK_CONTEXT_CATEGORIES
+    ):
+        return min(score, 4)
+    if NEGATED_SIGNAL_RE.search(context) and "memory_write" not in category_set:
+        return min(score, 4)
     return score
 
 
@@ -598,18 +802,30 @@ def apply_llm_review(
     return reviewed
 
 
-def render_markdown(paths: list[Path], scanned_files: int, findings: list[Finding]) -> str:
+def render_markdown(
+    paths: list[Path],
+    scanned_files: int,
+    findings: list[Finding],
+    *,
+    scan_status: str = "ok",
+    missing_paths: Iterable[Path] | None = None,
+) -> str:
     """把扫描结果渲染成人类可读的 Markdown 报告。"""
 
+    missing_path_list = [str(path) for path in missing_paths or []]
     lines = [
         "# OpenClaw Recommendation Poisoning Regex Candidate Scan",
         "",
+        f"Scan status: {scan_status}",
         f"Scanned paths: {len(paths)}",
         f"Scanned files: {scanned_files}",
         f"Regex candidates: {len(findings)}",
+        f"SQLite row limit per table: {SQLITE_ROW_LIMIT}",
         "Review required: yes",
         "",
     ]
+    if missing_path_list:
+        lines.extend(["Missing paths:", *[f"- `{path}`" for path in missing_path_list], ""])
     if not findings:
         lines.extend(
             [
@@ -653,16 +869,23 @@ def render_json_report(
     scanned_files: int,
     rule_paths: Iterable[Path],
     findings: list[Finding],
+    *,
+    scan_status: str = "ok",
+    missing_paths: Iterable[Path] | None = None,
 ) -> str:
     """Render machine-readable regex candidates with explicit review metadata."""
 
+    missing_path_list = [str(path) for path in missing_paths or []]
     return json.dumps(
         {
             "result_type": "regex_candidates",
+            "scan_status": scan_status,
             "review_required": True,
             "scanned_paths": [str(path) for path in paths],
+            "missing_paths": missing_path_list,
             "scanned_files": scanned_files,
             "candidate_count": len(findings),
+            "sqlite_row_limit_per_table": SQLITE_ROW_LIMIT,
             "rule_files": [str(path) for path in rule_paths if path.exists()],
             "findings": [asdict(finding) for finding in findings],
         },
@@ -671,25 +894,47 @@ def render_json_report(
     )
 
 
+RULE_CSV_COLUMNS = {"category", "pattern_type", "pattern"}
+
+
+def looks_like_rule_csv(path: Path) -> bool:
+    """Return whether an existing CSV has the expected regex rule columns."""
+
+    if path.suffix.lower() != ".csv":
+        return False
+    if not path.exists():
+        return True
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            fieldnames = {name.strip() for name in reader.fieldnames or [] if name}
+    except OSError:
+        return False
+    return RULE_CSV_COLUMNS.issubset(fieldnames)
+
+
 def split_swallowed_scan_paths(rule_args: list[Path]) -> tuple[list[Path], list[str]]:
     """Recover scan paths accidentally captured by ``--rules RULE [RULE ...]``.
 
     Argparse cannot know where variable-length rule files end and positional scan
-    paths begin. Rule libraries are CSV files, so a non-CSV token after at least
-    one CSV rule is much more likely to be a swallowed scan path.
+    paths begin. Rule libraries are CSV files with known columns, so an existing
+    non-rule CSV after at least one rule file is treated as a swallowed scan path.
     """
 
     rules: list[Path] = []
     swallowed_paths: list[str] = []
-    found_csv_rule = False
+    found_rule = False
     scanning_paths = False
 
     for value in rule_args:
-        if not scanning_paths and value.suffix.lower() == ".csv":
-            rules.append(value)
-            found_csv_rule = True
+        if scanning_paths:
+            swallowed_paths.append(str(value))
             continue
-        if found_csv_rule:
+        if value.suffix.lower() == ".csv" and (not found_rule or looks_like_rule_csv(value)):
+            rules.append(value)
+            found_rule = True
+            continue
+        if found_rule:
             scanning_paths = True
             swallowed_paths.append(str(value))
             continue
@@ -736,15 +981,26 @@ def configure_logging(verbose: bool = False, quiet: bool = False) -> None:
         level = logging.DEBUG
     else:
         level = logging.INFO
-    logging.basicConfig(level=level, format="[%(levelname)s] %(message)s", stream=sys.stderr)
+    logging.basicConfig(
+        level=level,
+        format="[%(levelname)s] %(message)s",
+        stream=sys.stderr,
+        force=True,
+    )
 
 
 def write_stdout(output: str) -> None:
     """Write report text using stdout's declared encoding with safe escaping."""
 
     encoding = sys.stdout.encoding or "utf-8"
-    sys.stdout.buffer.write(output.encode(encoding, errors="backslashreplace"))
-    sys.stdout.buffer.write(os.linesep.encode(encoding, errors="backslashreplace"))
+    encoded = output.encode(encoding, errors="backslashreplace")
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is not None:
+        buffer.write(encoded)
+        buffer.write(os.linesep.encode(encoding, errors="backslashreplace"))
+        return
+    sys.stdout.write(encoded.decode(encoding, errors="strict"))
+    sys.stdout.write(os.linesep)
 
 
 def main(argv: list[str]) -> int:
@@ -754,8 +1010,10 @@ def main(argv: list[str]) -> int:
     configure_logging(verbose=args.verbose, quiet=args.quiet)
     LOGGER.info("Starting OpenClaw recommendation-poisoning memory scan")
     rules = load_csv_rules(args.rules)
+    explicit_paths = bool(args.paths)
     paths = dedupe_paths(Path(path) for path in args.paths) if args.paths else default_paths()
     LOGGER.info("Scan paths: %s", ", ".join(str(path) for path in paths) if paths else "(none)")
+    missing_paths = [path for path in paths if not path.exists()]
     files = list(iter_files(paths))
     LOGGER.info("Discovered %s candidate file(s) to scan", len(files))
 
@@ -765,17 +1023,41 @@ def main(argv: list[str]) -> int:
         findings.extend(scan_file(file_path, rules=rules))
     LOGGER.info("Scan complete: %s file(s) scanned, %s finding(s)", len(files), len(findings))
 
-    if args.json:
-        output = render_json_report(paths, len(files), args.rules, findings)
+    if explicit_paths and missing_paths and not files:
+        scan_status = "invalid_input"
+    elif explicit_paths and not files:
+        scan_status = "no_memory_files"
+    elif explicit_paths and missing_paths:
+        scan_status = "partial"
     else:
-        output = render_markdown(paths, len(files), findings)
+        scan_status = "ok"
+
+    if args.json:
+        output = render_json_report(
+            paths,
+            len(files),
+            args.rules,
+            findings,
+            scan_status=scan_status,
+            missing_paths=missing_paths,
+        )
+    else:
+        output = render_markdown(
+            paths,
+            len(files),
+            findings,
+            scan_status=scan_status,
+            missing_paths=missing_paths,
+        )
 
     if args.output:
         Path(args.output).write_text(output, encoding="utf-8")
         LOGGER.info("Wrote scan report to %s", args.output)
     else:
         write_stdout(output)
-    return 2 if findings else 0
+    if findings:
+        return 2
+    return 1 if scan_status in {"invalid_input", "no_memory_files"} else 0
 
 
 if __name__ == "__main__":
