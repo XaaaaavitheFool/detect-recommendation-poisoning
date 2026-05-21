@@ -66,11 +66,17 @@ IGNORED_DIRECTORY_MARKERS = {
 RULE_LIBRARY_PREFIX = "recommendation_poisoning_keyword_regex_rules"
 SQLITE_ROW_LIMIT = 10000
 MAX_MATCHES_PER_PATTERN = 2000
+SCAN_STATUS_MESSAGES = {
+    "ok": "Scan completed.",
+    "partial": "Some provided paths were missing; scanned only discovered OpenClaw memory files.",
+    "invalid_input": "No scan completed because the provided scan path does not exist.",
+    "no_memory_files": "No OpenClaw memory files were found to scan.",
+}
 
 LOGGER = logging.getLogger("scan_openclaw_memory")
 
 # 单个 memory 文件过大时跳过，避免误扫日志归档或二进制缓存导致运行很久。
-MAX_FILE_BYTES = 25 * 1024 * 1024
+MAX_FILE_BYTES = 100 * 1024
 
 # 每个命中点前后保留的上下文长度，用于报告中人工复核。
 SNIPPET_RADIUS = 220
@@ -93,6 +99,8 @@ PATTERNS = {
         r"\bnever\s+(recommend|suggest|mention|show)\b",
         r"\bavoid\s+(recommending|suggesting|mentioning|showing)\b",
         r"\bhide\s+(competitors?|negative|bad|critical)\b",
+        r"(?:\u603b\u662f|\u59cb\u7ec8|\u4f18\u5148|\u9ed8\u8ba4)\s*"
+        r"\u63a8\u8350\s*[A-Za-z0-9][A-Za-z0-9 .&-]{1,80}",
     ],
     "injection": [
         r"\bignore\s+(all\s+)?(previous|prior|above)\s+instructions\b",
@@ -102,6 +110,11 @@ PATTERNS = {
         r"\bdo\s+not\s+(reveal|disclose|mention)\b",
         r"\bsecretly\s+(recommend|promote|prefer|bias)\b",
         r"\bwithout\s+(telling|informing|revealing)\s+(the\s+)?user\b",
+        r"\u5ffd\u7565\s*(?:\u4e4b\u524d|\u5148\u524d|\u4ee5\u4e0a|\u4e0a\u9762|"
+        r"\u6240\u6709|\u5168\u90e8).{0,20}?"
+        r"(?:\u6307\u4ee4|\u63d0\u793a|\u89c4\u5219|\u8981\u6c42)",
+        r"\u4e0d\u8981\s*(?:\u544a\u8bc9|\u544a\u77e5|\u900f\u9732|"
+        r"\u62ab\u9732|\u63d0\u53ca).{0,30}?\u7528\u6237",
         r"忽略(?:之前|先前|以上|上面|所有|全部).*?(?:指令|提示|规则|要求)",
         r"(?:系统|system)\s*(?:覆盖|重写|指令|消息|提示)",
         r"(?:开发者|developer)\s*(?:消息|指令|要求|覆盖)",
@@ -121,6 +134,12 @@ PATTERNS = {
         r"\bstored?\s+(memory|preference|profile|instruction)\b",
         r"\b(user\s+)?preference\b",
         r"\bmemory\s+(entry|record|note|instruction)\b",
+    ],
+    "memory_write": [
+        r"(?:\u8bf7\s*)?\u8bb0\u4f4f\s*[A-Za-z0-9][A-Za-z0-9 .&-]{1,80}",
+        r"(?:\u628a|\u5c06)\s*[A-Za-z0-9][A-Za-z0-9 .&-]{1,80}\s*"
+        r"(?:\u8bb0\u4f4f|\u5b58\u5165\u8bb0\u5fc6|\u4fdd\u5b58\u5230\u8bb0\u5fc6|"
+        r"\u52a0\u5165\u8bb0\u5fc6|\u5199\u5165\u8bb0\u5fc6)",
     ],
     "obfuscation": [
         r"[\u200b\u200c\u200d]",
@@ -176,25 +195,33 @@ SENSITIVE_REDACTIONS = [
     ),
 ]
 
-PLAIN_TECHNICAL_PREFERENCE_RE = re.compile(
-    r"(?i)\b(?:i|we)\s+(?:prefer|favor)\s+.+?\b(?:for\s+"
-    r"(?:scripting|programming|development)|technical\s+preference|"
-    r"not\s+a\s+product\s+recommendation)\b"
+ECONOMIC_VALUE_CONTEXT_RE = re.compile(
+    r"(?i)(?:"
+    r"\b(?:affiliate|commission|sponsor(?:ed)?|merchant|vendor[a-z0-9_-]*|seller|supplier|"
+    r"provider|product|brand|paid|pricing|price|purchase|buy|order|"
+    r"checkout|subscription|coupon|deal|discount|conversion|lead|sales|revenue|"
+    r"moneti[sz]ation|marketplace|e-?commerce|store|shop|saas|finance|financial|"
+    r"loan|credit|insurance|broker|investment|competitors?)\b|"
+    r"https?://|"
+    r"\b[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\."
+    r"(?:com|net|org|io|ai|co|app|dev|shop|store|biz|finance|market|agency)\b|"
+    r"(?:\u4ed8\u8d39|\u5546\u4e1a|\u5546\u52a1|\u7ecf\u6d4e|\u5546\u54c1|"
+    r"\u4ea7\u54c1|\u54c1\u724c|\u5382\u5546|\u4f9b\u5e94\u5546|"
+    r"\u670d\u52a1\u5546|\u5356\u5bb6|\u5546\u5bb6|\u5e02\u573a|"
+    r"\u8ba2\u9605|\u4ef7\u683c|\u5b9a\u4ef7|\u8d2d\u4e70|"
+    r"\u4e0b\u5355|\u4f18\u60e0\u5238|\u6298\u6263|\u8d5e\u52a9|\u5e7f\u544a|"
+    r"\u4f63\u91d1|\u8fd4\u5229|\u5bfc\u6d41|\u8f6c\u5316|\u8425\u6536|"
+    r"\u6536\u5165|\u91d1\u878d|\u8d37\u6b3e|\u4fdd\u9669|\u6295\u8d44|"
+    r"\u7535\u5546|\u5546\u5e97|\u5e97\u94fa|\u7ade\u4e89\u5bf9\u624b|"
+    r"\u7ade\u54c1|SEO|SaaS|VPN)"
+    r")",
+    re.DOTALL,
 )
 NEGATED_SIGNAL_RE = re.compile(
     r"(?i)\b(?:do\s+not|don't|never|must\s+not|should\s+not)\s+"
     r"(?:always\s+recommend|ignore\s+(?:previous|prior|above)\s+instructions|"
     r"hide\s+competitors|secretly\s+(?:promote|recommend|prefer))\b"
 )
-HIGH_RISK_CONTEXT_CATEGORIES = {
-    "injection",
-    "obfuscation",
-    "memory_write",
-    "trust_injection",
-    "citation_bias",
-    "user_preference_forgery",
-}
-
 SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)\b("
     r"api[_-]?key|token|secret|password|passwd|pwd|access[_-]?token|refresh[_-]?token"
@@ -203,7 +230,7 @@ SECRET_ASSIGNMENT_RE = re.compile(
 
 RULE_WEIGHTS = {
     "recommendation_control": 3,
-    "injection": 4,
+    "injection": 5,
     "commerce_or_ranking": 1,
     "persistence": 1,
     "obfuscation": 2,
@@ -334,9 +361,10 @@ def iter_files(paths: Iterable[Path]) -> Iterable[Path]:
             LOGGER.warning("Scan path does not exist: %s", path)
             continue
         if path.is_file():
-            if not is_supported(path):
-                LOGGER.debug("Scanning explicitly provided file with uncommon extension: %s", path)
-            yield path
+            if is_explicit_memory_file(path):
+                yield path
+            else:
+                LOGGER.warning("Skipping non-memory file: %s", path)
             continue
         LOGGER.info("Walking directory: %s", path)
         for file_path in path.rglob("*"):
@@ -409,8 +437,22 @@ def is_rule_library_file(path: Path) -> bool:
 def is_memory_scan_root(path: Path) -> bool:
     """Return whether the supplied directory itself appears to be a memory root."""
 
-    markers = path_markers(path)
+    try:
+        root = path.expanduser().resolve()
+    except OSError:
+        root = path.expanduser().absolute()
+    markers = path_markers(root)
     return bool(markers) and has_memory_marker([markers[-1]])
+
+
+def is_explicit_memory_file(path: Path) -> bool:
+    """Return true for an explicitly provided file that looks like memory."""
+
+    if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+        return False
+    if is_rule_library_file(path):
+        return False
+    return has_memory_marker(path_markers(path))
 
 
 def is_openclaw_memory_file(path: Path, scan_root: Path | None = None) -> bool:
@@ -630,6 +672,9 @@ def scan_text(
         ]
         start = min(hit_start for hit_start, _hit_end, _category, _term in window_hits)
         end = max(hit_end for _hit_start, hit_end, _category, _term in window_hits)
+        context = context_window(text, start, end)
+        if not has_economic_value_context(context) and "injection" not in categories:
+            continue
 
         score = score_categories(categories)
         score = adjust_score_for_context(score, categories, text, start, end)
@@ -650,6 +695,20 @@ def scan_text(
             )
         )
     return findings
+
+
+def context_window(text: str, start: int, end: int) -> str:
+    """Return surrounding text used for context-sensitive filters."""
+
+    window_start = max(0, start - SNIPPET_RADIUS)
+    window_end = min(len(text), end + SNIPPET_RADIUS)
+    return text[window_start:window_end]
+
+
+def has_economic_value_context(context: str) -> bool:
+    """Return whether the candidate is in a commercial or economic context."""
+
+    return bool(ECONOMIC_VALUE_CONTEXT_RE.search(context))
 
 
 def score_categories(categories: list[str]) -> int:
@@ -688,15 +747,8 @@ def adjust_score_for_context(
 ) -> int:
     """Dampen obvious false-positive contexts without hiding the regex candidate."""
 
-    window_start = max(0, start - SNIPPET_RADIUS)
-    window_end = min(len(text), end + SNIPPET_RADIUS)
-    context = text[window_start:window_end]
+    context = context_window(text, start, end)
     category_set = set(categories)
-
-    if PLAIN_TECHNICAL_PREFERENCE_RE.search(context) and not (
-        category_set & HIGH_RISK_CONTEXT_CATEGORIES
-    ):
-        return min(score, 4)
     if NEGATED_SIGNAL_RE.search(context) and "memory_write" not in category_set:
         return min(score, 4)
     return score
@@ -809,14 +861,17 @@ def render_markdown(
     *,
     scan_status: str = "ok",
     missing_paths: Iterable[Path] | None = None,
+    scan_message: str | None = None,
 ) -> str:
     """把扫描结果渲染成人类可读的 Markdown 报告。"""
 
     missing_path_list = [str(path) for path in missing_paths or []]
+    message = scan_message or SCAN_STATUS_MESSAGES.get(scan_status, "")
     lines = [
         "# OpenClaw Recommendation Poisoning Regex Candidate Scan",
         "",
         f"Scan status: {scan_status}",
+        f"Scan message: {message}",
         f"Scanned paths: {len(paths)}",
         f"Scanned files: {scanned_files}",
         f"Regex candidates: {len(findings)}",
@@ -827,6 +882,15 @@ def render_markdown(
     if missing_path_list:
         lines.extend(["Missing paths:", *[f"- `{path}`" for path in missing_path_list], ""])
     if not findings:
+        if scan_status == "no_memory_files":
+            lines.extend(
+                [
+                    "No OpenClaw memory files were found, so no memory content was scanned.",
+                    "",
+                    "Provide an OpenClaw memory file or an OpenClaw memory directory and run the scanner again.",
+                ]
+            )
+            return "\n".join(lines)
         lines.extend(
             [
                 "No recommendation-poisoning regex candidates were found.",
@@ -872,14 +936,17 @@ def render_json_report(
     *,
     scan_status: str = "ok",
     missing_paths: Iterable[Path] | None = None,
+    scan_message: str | None = None,
 ) -> str:
     """Render machine-readable regex candidates with explicit review metadata."""
 
     missing_path_list = [str(path) for path in missing_paths or []]
+    message = scan_message or SCAN_STATUS_MESSAGES.get(scan_status, "")
     return json.dumps(
         {
             "result_type": "regex_candidates",
             "scan_status": scan_status,
+            "scan_message": message,
             "review_required": True,
             "scanned_paths": [str(path) for path in paths],
             "missing_paths": missing_path_list,
@@ -903,7 +970,7 @@ def looks_like_rule_csv(path: Path) -> bool:
     if path.suffix.lower() != ".csv":
         return False
     if not path.exists():
-        return True
+        return False
     try:
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
@@ -930,11 +997,11 @@ def split_swallowed_scan_paths(rule_args: list[Path]) -> tuple[list[Path], list[
         if scanning_paths:
             swallowed_paths.append(str(value))
             continue
-        if value.suffix.lower() == ".csv" and (not found_rule or looks_like_rule_csv(value)):
+        if looks_like_rule_csv(value):
             rules.append(value)
             found_rule = True
             continue
-        if found_rule:
+        if found_rule or value.suffix.lower() == ".csv":
             scanning_paths = True
             swallowed_paths.append(str(value))
             continue
@@ -958,7 +1025,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--rules",
         type=Path,
         nargs="+",
-        default=DEFAULT_RULE_PATHS,
+        default=None,
         metavar="RULE_CSV",
         help=(
             "CSV regex rule files to load. Use '--' before scan paths when passing "
@@ -966,9 +1033,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     args = parser.parse_args(argv)
-    args.rules, swallowed_paths = split_swallowed_scan_paths(args.rules)
-    if swallowed_paths:
-        args.paths = swallowed_paths + args.paths
+    if args.rules is None:
+        args.rules = DEFAULT_RULE_PATHS
+    else:
+        args.rules, swallowed_paths = split_swallowed_scan_paths(args.rules)
+        if swallowed_paths:
+            args.paths = swallowed_paths + args.paths
     return args
 
 
@@ -1025,12 +1095,13 @@ def main(argv: list[str]) -> int:
 
     if explicit_paths and missing_paths and not files:
         scan_status = "invalid_input"
-    elif explicit_paths and not files:
+    elif not files:
         scan_status = "no_memory_files"
     elif explicit_paths and missing_paths:
         scan_status = "partial"
     else:
         scan_status = "ok"
+    scan_message = SCAN_STATUS_MESSAGES.get(scan_status, "")
 
     if args.json:
         output = render_json_report(
@@ -1040,6 +1111,7 @@ def main(argv: list[str]) -> int:
             findings,
             scan_status=scan_status,
             missing_paths=missing_paths,
+            scan_message=scan_message,
         )
     else:
         output = render_markdown(
@@ -1048,6 +1120,7 @@ def main(argv: list[str]) -> int:
             findings,
             scan_status=scan_status,
             missing_paths=missing_paths,
+            scan_message=scan_message,
         )
 
     if args.output:

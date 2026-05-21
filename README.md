@@ -21,7 +21,7 @@ The bundled scanner checks for combinations of signals across English and Chines
 - User preference forgery such as claims that the user has always trusted, verified, preferred, or chosen a specific entity.
 - Combined signals where an AI prompt URL, brand/domain, future reference, memory write, and recommendation control appear together.
 
-Supported explicit scan targets include common text and memory formats such as Markdown, JSON, JSONL, TXT, YAML, TOML, logs, CSV files, and SQLite databases. When a directory is provided, recursive discovery is narrower: the scanner only selects files that appear to be OpenClaw memory artifacts, such as files under an OpenClaw `memory` or `memories` directory or files whose own name includes both OpenClaw and memory markers.
+Supported memory scan targets include common text and memory formats such as Markdown, JSON, JSONL, TXT, YAML, TOML, logs, CSV files, and SQLite databases. The scanner only selects files that appear to be OpenClaw memory artifacts, such as files under an OpenClaw `memory` or `memories` directory or files whose own name indicates memory content.
 
 ## OpenClaw Skill Installation
 
@@ -96,7 +96,7 @@ python scripts/scan_openclaw_memory.py
 
 When no path is provided, the scanner checks common OpenClaw memory locations, including `OPENCLAW_MEMORY_DIR`, `OPENCLAW_HOME`, `.openclaw`, `openclaw`, `memory`, and `memories` directories under the current workspace or user profile.
 
-Directory scans are filtered before file content is read. Passing a broad path such as a project root will not scan every supported text file below it; only OpenClaw memory-looking files are considered. To scan a one-off file with an unusual name, pass that file explicitly.
+Directory and explicit-file scans are filtered before file content is read. Passing a broad path such as a project root will not scan every supported text file below it; only OpenClaw memory-looking files are considered. Passing an ordinary non-memory file explicitly will be skipped.
 
 Scan one or more explicit paths:
 
@@ -136,7 +136,7 @@ The default output is a Markdown candidate report. Use `--json` for machine-read
 
 The scanner redacts common direct identifiers and secrets such as emails, bearer tokens, API keys, passwords, and URL-embedded credentials in snippets.
 
-JSON output includes `scan_status`. Treat `invalid_input` and `no_memory_files` as runs that did not complete a useful memory scan. SQLite scanning also reports `sqlite_row_limit_per_table`; if a table reaches that limit, the scanner logs a warning so large databases are not mistaken for fully scanned tables.
+JSON output includes `scan_status` and `scan_message`. Treat `invalid_input` and `no_memory_files` as runs that did not complete a useful memory scan. If `no_memory_files` is reported, tell the user no OpenClaw memory files were found instead of presenting the result as clean. SQLite scanning also reports `sqlite_row_limit_per_table`; if a table reaches that limit, the scanner logs a warning so large databases are not mistaken for fully scanned tables.
 
 ## Review Guidance
 
@@ -150,7 +150,7 @@ Before marking an injection-looking candidate suspicious, check whether it is ne
 
 After review, create a final Markdown report file rather than only summarizing in chat. The report should include the source scanner JSON, scan status, scanned file count, regex candidate count, reviewed counts for `suspicious`, `uncertain`, and `benign/suppressed`, grouped suspicious findings, uncertain manual-inspection items, affected domains or products, and cleanup recommendations.
 
-The reviewed report must also include detailed evidence for every non-benign candidate. Each evidence row must include verdict, original scanner severity, original scanner score if available, filename or path, line number, source, categories, matched terms, the redacted matched paragraph/snippet, and the review reason. Grouped domain or pattern summaries are useful, but they must not replace the detailed evidence table.
+The reviewed report must also include detailed evidence for every non-benign candidate. Each evidence row must include verdict, original scanner severity, original scanner score if available, filename or path, line number, source, categories, matched terms, the complete redacted matched record or paragraph, and the review reason. If the scanner JSON snippet starts or ends in the middle of a word or sentence, re-read the current source memory file and expand the final report evidence to the complete memory record, line, or paragraph. Grouped domain or pattern summaries are useful, but they must not replace the detailed evidence table.
 
 The numeric score is a scanner-generated regex triage score, not an LLM judgment. Use it only for sorting and explaining why a candidate was surfaced. Do not ask the reviewing model to invent or revise a score; the review step should produce only a verdict (`suspicious`, `uncertain`, or `benign`) and a reason.
 
