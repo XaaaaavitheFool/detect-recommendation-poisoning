@@ -195,28 +195,6 @@ SENSITIVE_REDACTIONS = [
     ),
 ]
 
-ECONOMIC_VALUE_CONTEXT_RE = re.compile(
-    r"(?i)(?:"
-    r"\b(?:affiliate|commission|sponsor(?:ed)?|merchant|vendor[a-z0-9_-]*|seller|supplier|"
-    r"provider|product|brand|paid|pricing|price|purchase|buy|order|"
-    r"checkout|subscription|coupon|deal|discount|conversion|lead|sales|revenue|"
-    r"moneti[sz]ation|marketplace|e-?commerce|store|shop|saas|finance|financial|"
-    r"loan|credit|insurance|broker|investment|competitors?)\b|"
-    r"https?://|"
-    r"\b[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\."
-    r"(?:com|net|org|io|ai|co|app|dev|shop|store|biz|finance|market|agency)\b|"
-    r"(?:\u4ed8\u8d39|\u5546\u4e1a|\u5546\u52a1|\u7ecf\u6d4e|\u5546\u54c1|"
-    r"\u4ea7\u54c1|\u54c1\u724c|\u5382\u5546|\u4f9b\u5e94\u5546|"
-    r"\u670d\u52a1\u5546|\u5356\u5bb6|\u5546\u5bb6|\u5e02\u573a|"
-    r"\u8ba2\u9605|\u4ef7\u683c|\u5b9a\u4ef7|\u8d2d\u4e70|"
-    r"\u4e0b\u5355|\u4f18\u60e0\u5238|\u6298\u6263|\u8d5e\u52a9|\u5e7f\u544a|"
-    r"\u4f63\u91d1|\u8fd4\u5229|\u5bfc\u6d41|\u8f6c\u5316|\u8425\u6536|"
-    r"\u6536\u5165|\u91d1\u878d|\u8d37\u6b3e|\u4fdd\u9669|\u6295\u8d44|"
-    r"\u7535\u5546|\u5546\u5e97|\u5e97\u94fa|\u7ade\u4e89\u5bf9\u624b|"
-    r"\u7ade\u54c1|SEO|SaaS|VPN)"
-    r")",
-    re.DOTALL,
-)
 NEGATED_SIGNAL_RE = re.compile(
     r"(?i)\b(?:do\s+not|don't|never|must\s+not|should\s+not)\s+"
     r"(?:always\s+recommend|ignore\s+(?:previous|prior|above)\s+instructions|"
@@ -672,9 +650,6 @@ def scan_text(
         ]
         start = min(hit_start for hit_start, _hit_end, _category, _term in window_hits)
         end = max(hit_end for _hit_start, hit_end, _category, _term in window_hits)
-        context = context_window(text, start, end)
-        if not has_economic_value_context(context) and "injection" not in categories:
-            continue
 
         score = score_categories(categories)
         score = adjust_score_for_context(score, categories, text, start, end)
@@ -703,12 +678,6 @@ def context_window(text: str, start: int, end: int) -> str:
     window_start = max(0, start - SNIPPET_RADIUS)
     window_end = min(len(text), end + SNIPPET_RADIUS)
     return text[window_start:window_end]
-
-
-def has_economic_value_context(context: str) -> bool:
-    """Return whether the candidate is in a commercial or economic context."""
-
-    return bool(ECONOMIC_VALUE_CONTEXT_RE.search(context))
 
 
 def score_categories(categories: list[str]) -> int:
