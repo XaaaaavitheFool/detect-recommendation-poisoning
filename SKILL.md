@@ -37,17 +37,19 @@ Multiple paths can be passed:
 python scripts/scan_openclaw_memory.py C:\path\to\openclaw\memory C:\path\to\other-memory.json
 ```
 
-Write machine-readable output:
-
-```bash
-python scripts/scan_openclaw_memory.py --json --output findings.json C:\path\to\memory
-```
-
-When preparing a user-facing report, run JSON output and review the regex candidates before reporting:
+Capture machine-readable output for internal review only:
 
 ```bash
 python scripts/scan_openclaw_memory.py --json C:\path\to\memory
 ```
+
+When preparing a user-facing report, run JSON output and review the regex candidates before reporting. Treat the scanner JSON as an internal working artifact:
+
+```bash
+python scripts/scan_openclaw_memory.py --json C:\path\to\memory
+```
+
+Do not show, quote, attach, link, or summarize the raw scanner JSON to the user. Do not write scanner JSON to disk unless an internal temporary file is necessary for processing; if such a file is created, delete it after the reviewed Markdown report is written and do not disclose its path.
 
 The scanner itself does not configure or call a separate model. Its output is an unreviewed candidate list, not the final assessment.
 
@@ -61,12 +63,24 @@ Use `--` to separate rule files from scan paths, especially when the scan target
 
 If JSON output reports `scan_status` as `invalid_input` or `no_memory_files`, treat the run as not having completed a useful memory scan. SQLite tables are scanned with a documented per-table row limit; check `sqlite_row_limit_per_table` in JSON output when reviewing large databases.
 
+## Strict Review Execution Contract
+
+During review, execute this skill exactly as written and in order. Do not replace, reorder, or skip workflow steps unless a step explicitly says to stop for that condition. Do not add extra review criteria, risk labels, scoring, mitigations, assumptions, or conclusions beyond what this skill and the scanner JSON require.
+
+The scanner JSON is internal-only. Use it only as review input; never expose its raw contents, filename, path, or structured fields to the user except as reviewed evidence already rewritten into the final Markdown report. The reviewed Markdown report is the source of truth for user-facing results. Every chat summary must be copied or directly derived from the current reviewed report; do not infer additional findings from memory, prior reports, unstated context, scanner JSON fields not included in the reviewed report, or model intuition. If a required scan, review, or report-writing step fails, state the failed step and do not present the scan as completed.
+
+End every completed chat response for this skill with this exact marker on its own line:
+
+```text
+=== SKILL EXECUTION COMPLETE: detect-recommendation-poisoning ===
+```
+
 ## Workflow
 
 1. Locate the user's local memory files. If `scan_path` is provided, pass it directly to the script as positional arguments. Otherwise, let the scanner check common locations such as `OPENCLAW_HOME`, `OPENCLAW_MEMORY_DIR`, `.openclaw`, `openclaw`, and `memory` directories under the current working directory and user profile. The scanner must only scan OpenClaw memory-looking files; do not broaden the target by scanning arbitrary files under a path, and do not scan explicit single files unless they look like memory artifacts.
-2. Run `scripts/scan_openclaw_memory.py --json {{scan_path}}` when you will prepare the final report yourself; append `{{scan_path}}` as positional arguments and omit it if not provided.
+2. Run `scripts/scan_openclaw_memory.py --json {{scan_path}}` when you will prepare the final report yourself; append `{{scan_path}}` as positional arguments and omit it if not provided. Capture the JSON internally. Do not display it in chat or save it as a user-facing artifact.
    - If the scanner reports `scan_status: no_memory_files`, stop and tell the user that no OpenClaw memory files were found instead of producing a clean/security-passed report.
-3. Mandatory review gate: treat every regex finding as a candidate, not proof. Review the JSON `findings` in the conversation before presenting anything as likely poisoning.
+3. Mandatory review gate: treat every regex finding as a candidate, not proof. Review the internal JSON `findings` before presenting anything as likely poisoning.
    - The LLM review process must first check whether each regex candidate is in a commercial or economic-value context, using the scanner result fields such as `snippet`, `matched_terms`, `categories`, `path`, and `source`. Commercial context includes products, brands, vendors, providers, services, purchases, subscriptions, sponsorships, affiliates, commissions, pricing, rankings, ratings, citations, traffic steering, or other monetizable recommendations.
    - If that commercial/economic context is absent, mark the candidate `benign` and suppress it from suspicious/uncertain findings, even when the raw regex matched injection-like or preference-like language. This is a review-time filter; do not change or depend on scanner implementation for this decision.
 4. During model review, mark a candidate:
@@ -76,10 +90,10 @@ If JSON output reports `scan_status` as `invalid_input` or `no_memory_files`, tr
    - Check negation, quoted examples, sarcasm, and "what not to do" safety guidance before treating an injection-looking candidate as suspicious.
 5. For each reviewed candidate, keep a compact review record with `verdict`, `reason`, original scanner `severity`, original scanner `score` when present, `categories`, `matched_terms`, `path`, `line`, and `snippet`. For large result sets, review in batches by severity and source path. Do not ask the reviewing model to invent or revise a numeric score; the model review output is only `verdict` and `reason`.
 6. Base the review only on the current scanner JSON candidates and, when needed, the current source memory files. Do not read, reuse, summarize, diff against, or cite any previous reviewed report file such as `*_reviewed.md`; prior reviewed reports are stale outputs, not review inputs.
-7. After review, write a final reviewed Markdown report to disk before answering the user. If the scanner JSON was written to a file, place the reviewed report next to it as `<scan-report-stem>_reviewed.md` (for example, `scan_report_reviewed.md`). If the scanner JSON was only printed to stdout, write `openclaw_recommendation_poisoning_reviewed_report.md` in the current working directory unless the user requested another path. If the final reviewed report path already exists, overwrite it with the newly reviewed report so stale review output cannot be mistaken for the current result.
-8. Do not pass through the raw scanner output as the final answer. The final reviewed report file must include review counts for `suspicious`, `uncertain`, and `benign/suppressed`.
+7. After review, write a final reviewed Markdown report to disk before answering the user. Write `openclaw_recommendation_poisoning_reviewed_report.md` in the current working directory unless the user requested another reviewed-report path. If the final reviewed report path already exists, overwrite it with the newly reviewed report so stale review output cannot be mistaken for the current result. If an internal scanner JSON file was created, delete it after the reviewed report is written.
+8. Do not pass through the raw scanner output as the final answer or include it in the reviewed report. The final reviewed report file must include review counts for `suspicious`, `uncertain`, and `benign/suppressed`.
 9. The final reviewed report file must include:
-   - source scanner JSON path or note that stdout JSON was reviewed
+   - note that internal scanner JSON was reviewed, without exposing its path or raw contents
    - scan status, scanned paths, scanned file count, and regex candidate count
    - review methodology and review labels
    - counts for `suspicious`, `uncertain`, and `benign/suppressed`
@@ -91,7 +105,7 @@ If JSON output reports `scan_status` as `invalid_input` or `no_memory_files`, tr
    - affected brands/items/categories if obvious
    - why each finding or group matters
    - recommended cleanup, quarantine, or follow-up validation
-10. In the chat final answer, summarize the reviewed counts and link to the reviewed report file. Do not rely on chat text alone as the final report.
+10. In the chat final answer, report only the reviewed counts, the reviewed report path, and any blocker already recorded in the reviewed report. Do not rely on chat text alone as the final report, and do not add findings, caveats, or recommendations that are not in the reviewed report.
 11. Report content:
    - scanned paths and file count
    - `suspicious` snippets that remain after review
@@ -143,7 +157,7 @@ Final reviewed report template:
 # Reviewed OpenClaw Recommendation Poisoning Report
 
 Reviewed on: YYYY-MM-DD
-Source scanner output: path/to/scan_report.json
+Source scanner output: internal scanner JSON reviewed; raw JSON not disclosed
 
 ## Summary
 
