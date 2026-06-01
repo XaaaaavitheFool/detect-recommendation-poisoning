@@ -1,6 +1,6 @@
 # Detect Recommendation Poisoning
 
-`detect-recommendation-poisoning` is an OpenClaw skill for scanning local AI memory files for recommendation poisoning signals. It looks for suspicious attempts to make an AI assistant remember, trust, cite, prefer, rank, or recommend a specific brand, vendor, product, source, or domain in future answers.
+`detect-recommendation-poisoning` is an OpenClaw skill for scanning local OpenClaw and Hermes AI memory files for recommendation poisoning signals. It looks for suspicious attempts to make an AI assistant remember, trust, cite, prefer, rank, or recommend a specific brand, vendor, product, source, or domain in future answers.
 
 The skill is designed for local use. It does not upload memory files, does not call a separate model by itself, and does not automatically delete or modify memories. Its scanner produces regex candidates that should be reviewed before they are treated as real poisoning.
 
@@ -8,7 +8,7 @@ The skill is designed for local use. It does not upload memory files, does not c
 
 AI assistants are becoming search, comparison, purchasing, and decision-support interfaces. At the same time, many assistants and agent frameworks now keep long-term memory. That creates a new attack surface: a prompt hidden behind a normal-looking "Summarize with AI" or "Ask AI about this" link can try to write persistent bias into an assistant's memory.
 
-Microsoft Defender Security Research publicly described this pattern as AI Recommendation Poisoning in February 2026, including prompts that try to make AI assistants remember a company as trusted, cite a source in the future, or recommend a product first. This skill focuses on the local memory layer: after suspicious content has entered OpenClaw memory, it helps users find and review it.
+Microsoft Defender Security Research publicly described this pattern as AI Recommendation Poisoning in February 2026, including prompts that try to make AI assistants remember a company as trusted, cite a source in the future, or recommend a product first. This skill focuses on the local memory layer: after suspicious content has entered OpenClaw or Hermes memory, it helps users find and review it.
 
 ## What It Detects
 
@@ -21,7 +21,7 @@ The bundled scanner checks for combinations of signals across English and Chines
 - User preference forgery such as claims that the user has always trusted, verified, preferred, or chosen a specific entity.
 - Combined signals where an AI prompt URL, brand/domain, future reference, memory write, and recommendation control appear together.
 
-Supported memory scan targets include common text and memory formats such as Markdown, JSON, JSONL, TXT, YAML, TOML, logs, CSV files, and SQLite databases. The scanner only selects files that appear to be OpenClaw memory artifacts, such as files under an OpenClaw `memory` or `memories` directory or files whose own name indicates memory content.
+Supported memory scan targets include common text and memory formats such as Markdown, JSON, JSONL, TXT, YAML, TOML, logs, CSV files, and SQLite databases. The scanner selects OpenClaw memory-looking files, such as files under an OpenClaw `memory` or `memories` directory. For Hermes, it intentionally scans only profile memory files named exactly `MEMORY.md` or `USER.md`; it does not scan Hermes `user.md`, `state.db`, traces, logs, or JSONL files.
 
 ## OpenClaw Skill Installation
 
@@ -66,18 +66,18 @@ After cloning, restart or reload OpenClaw so it can discover the new skill. The 
 Ask OpenClaw to use the skill directly:
 
 ```text
-Use the detect-recommendation-poisoning skill to scan my OpenClaw memory files and report suspicious findings.
+Use the detect-recommendation-poisoning skill to scan my OpenClaw or Hermes memory files and report suspicious findings.
 ```
 
 To scan a specific memory directory or file:
 
 ```text
-Use the detect-recommendation-poisoning skill to scan C:\path\to\openclaw\memory and produce a reviewed report.
+Use the detect-recommendation-poisoning skill to scan C:\path\to\openclaw\memory or C:\Users\me\.hermes\memories and produce a reviewed report.
 ```
 
 The expected workflow is:
 
-1. Locate the OpenClaw memory files, or provide an explicit path.
+1. Locate the OpenClaw or Hermes memory files, or provide an explicit path.
 2. Run the scanner with JSON output when preparing a reviewed report.
 3. Treat every scanner match as a candidate, not proof.
 4. Review each candidate as `suspicious`, `uncertain`, or `benign`.
@@ -94,14 +94,14 @@ cd detect-recommendation-poisoning
 python scripts/scan_openclaw_memory.py
 ```
 
-When no path is provided, the scanner checks common OpenClaw memory locations, including `OPENCLAW_MEMORY_DIR`, `OPENCLAW_HOME`, `.openclaw`, `openclaw`, `memory`, and `memories` directories under the current workspace or user profile.
+When no path is provided, the scanner checks common OpenClaw and Hermes memory locations, including `OPENCLAW_MEMORY_DIR`, `OPENCLAW_HOME`, `HERMES_MEMORY_DIR`, `HERMES_HOME`, `.openclaw`, `openclaw`, `.hermes`, `hermes`, `memory`, and `memories` directories under the current workspace or user profile.
 
-Directory and explicit-file scans are filtered before file content is read. Passing a broad path such as a project root will not scan every supported text file below it; only OpenClaw memory-looking files are considered. Passing an ordinary non-memory file explicitly will be skipped.
+Directory and explicit-file scans are filtered before file content is read. Passing a broad path such as a project root will not scan every supported text file below it; only OpenClaw memory-looking files and Hermes `MEMORY.md`/`USER.md` files are considered. Passing an ordinary non-memory file explicitly will be skipped.
 
 Scan one or more explicit paths:
 
 ```bash
-python scripts/scan_openclaw_memory.py /path/to/openclaw/memory /path/to/other-memory.json
+python scripts/scan_openclaw_memory.py /path/to/openclaw/memory ~/.hermes/memories /path/to/other-memory.json
 ```
 
 Write JSON output for review or automation:
@@ -136,7 +136,7 @@ The default output is a Markdown candidate report. Use `--json` for machine-read
 
 The scanner redacts common direct identifiers and secrets such as emails, bearer tokens, API keys, passwords, and URL-embedded credentials in snippets.
 
-JSON output includes `scan_status` and `scan_message`. Treat `invalid_input` and `no_memory_files` as runs that did not complete a useful memory scan. If `no_memory_files` is reported, tell the user no OpenClaw memory files were found instead of presenting the result as clean. SQLite scanning also reports `sqlite_row_limit_per_table`; if a table reaches that limit, the scanner logs a warning so large databases are not mistaken for fully scanned tables.
+JSON output includes `scan_status` and `scan_message`. Treat `invalid_input` and `no_memory_files` as runs that did not complete a useful memory scan. If `no_memory_files` is reported, tell the user no OpenClaw or Hermes memory files were found instead of presenting the result as clean. SQLite scanning also reports `sqlite_row_limit_per_table`; if a table reaches that limit, the scanner logs a warning so large databases are not mistaken for fully scanned tables.
 
 ## Review Guidance
 
@@ -148,9 +148,9 @@ Mark a candidate as `uncertain` when the snippet lacks enough context. Report un
 
 Before marking an injection-looking candidate suspicious, check whether it is negated, quoted as an example, sarcastic, or part of "what not to do" safety guidance.
 
-After review, create a final Markdown report file rather than only summarizing in chat. The report should include the source scanner JSON, scan status, scanned file count, regex candidate count, reviewed counts for `suspicious`, `uncertain`, and `benign/suppressed`, grouped suspicious findings, uncertain manual-inspection items, affected domains or products, and cleanup recommendations.
+After review, create a final Markdown report file rather than only summarizing in chat. The reviewed Markdown report should use the user's current request language. If that cannot be inferred, use the system/local locale; if that also cannot be inferred, use English. Keep scanner JSON field names machine-readable and unchanged. The report should include the source scanner JSON, scan status, scanned file count, regex candidate count, reviewed counts for `suspicious`, `uncertain`, and `benign/suppressed`, grouped suspicious findings, uncertain manual-inspection items, affected domains or products, and cleanup recommendations.
 
-The reviewed report must also include detailed evidence for every non-benign candidate. Each evidence row must include verdict, original scanner severity, original scanner score if available, filename or path, line number, source, categories, matched terms, the complete redacted matched record or paragraph, and the review reason. If the scanner JSON snippet starts or ends in the middle of a word or sentence, re-read the current source memory file and expand the final report evidence to the complete memory record, line, or paragraph. Grouped domain or pattern summaries are useful, but they must not replace the detailed evidence table.
+The reviewed report must also include detailed evidence for every non-benign candidate. Use a compact index table with only item number, verdict, original scanner severity, scanner score if available, filename or path, and categories; put long evidence in separate evidence blocks so the Markdown stays readable. Each evidence block must include verdict, original scanner severity, original scanner score if available, filename or path, line number, source, categories, matched terms, the complete redacted matched record or paragraph, and the review reason. Scanner JSON `snippet` is an internal locator, not final report evidence. Re-read the current source memory file and use the complete memory record, line, or blank-line-delimited paragraph that contains the match. For JSON/JSONL, use the complete object or record when possible. For SQLite, use the matching row text. Fall back to the scanner snippet only when the source file or row is unavailable, and label that fallback as `scanner-truncated evidence` / `扫描器截断证据`. Grouped domain or pattern summaries are useful, but they must not replace the detailed evidence section.
 
 The numeric score is a scanner-generated regex triage score, not an LLM judgment. Use it only for sorting and explaining why a candidate was surfaced. Do not ask the reviewing model to invent or revise a score; the review step should produce only a verdict (`suspicious`, `uncertain`, or `benign`) and a reason.
 
@@ -160,7 +160,8 @@ Recommended report naming:
 
 - Saved scanner output `scan_report.json` -> reviewed report `scan_report_reviewed.md`.
 - Saved scanner output `findings.json` -> reviewed report `findings_reviewed.md`.
-- Stdout-only scanner output -> reviewed report `openclaw_recommendation_poisoning_reviewed_report.md`.
+- Stdout-only OpenClaw scanner output -> reviewed report `openclaw_recommendation_poisoning_reviewed_report.md`.
+- Stdout-only Hermes scanner output -> reviewed report `hermes_recommendation_poisoning_reviewed_report.md`.
 
 If the reviewed report path already exists, overwrite it with the current reviewed report. Do not inspect or reuse the old report before overwriting it, and do not create timestamped or numbered alternates unless the user explicitly requests versioned reports.
 

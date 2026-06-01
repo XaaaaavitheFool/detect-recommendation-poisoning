@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Scan OpenClaw memory files for recommendation poisoning indicators."""
+"""Scan OpenClaw and Hermes memory files for recommendation poisoning indicators."""
 
 from __future__ import annotations
 
 import argparse
 import csv
+from datetime import date
 import json
 import logging
+import locale
 import os
 import re
 import sqlite3
@@ -31,6 +33,7 @@ SQLITE_EXTENSIONS = {".db", ".sqlite", ".sqlite3"}
 SUPPORTED_EXTENSIONS = TEXT_EXTENSIONS | SQLITE_EXTENSIONS
 
 OPENCLAW_MARKERS = {"openclaw"}
+HERMES_MARKERS = {"hermes"}
 MEMORY_MARKERS = {
     "memory",
     "memories",
@@ -41,6 +44,10 @@ MEMORY_MARKERS = {
     "assistant_memory",
     "conversation_memory",
 }
+HERMES_MEMORY_FILENAMES = (
+    "MEMORY.md",
+    "USER.md",
+)
 IGNORED_DIRECTORY_MARKERS = {
     "git",
     "hg",
@@ -68,9 +75,9 @@ SQLITE_ROW_LIMIT = 10000
 MAX_MATCHES_PER_PATTERN = 2000
 SCAN_STATUS_MESSAGES = {
     "ok": "Scan completed.",
-    "partial": "Some provided paths were missing; scanned only discovered OpenClaw memory files.",
+    "partial": "Some provided paths were missing; scanned only discovered supported memory files.",
     "invalid_input": "No scan completed because the provided scan path does not exist.",
-    "no_memory_files": "No OpenClaw memory files were found to scan.",
+    "no_memory_files": "No OpenClaw or Hermes memory files were found to scan.",
 }
 
 LOGGER = logging.getLogger("scan_openclaw_memory")
@@ -244,6 +251,15 @@ class LLMReview:
     reason: str
 
 
+@dataclass
+class EvidenceRecord:
+    """Resolved user-facing evidence for a reviewed finding."""
+
+    text: str
+    source_label: str
+    scanner_truncated: bool = False
+
+
 def load_csv_rules(paths: Iterable[Path]) -> dict[str, list[re.Pattern[str]]]:
     """Load the English/Chinese CSV regex rules and merge them with built-in rules."""
 
@@ -298,18 +314,34 @@ def default_paths() -> list[Path]:
         if value:
             candidates.append(Path(value).expanduser())
 
+    hermes_memory_dir = os.environ.get("HERMES_MEMORY_DIR")
+    if hermes_memory_dir:
+        root = Path(hermes_memory_dir).expanduser()
+        candidates.extend(root / filename for filename in HERMES_MEMORY_FILENAMES)
+
+    hermes_home = os.environ.get("HERMES_HOME")
+    if hermes_home:
+        root = Path(hermes_home).expanduser()
+        candidates.extend(root / "memories" / filename for filename in HERMES_MEMORY_FILENAMES)
+
     home = Path.home()
     cwd = Path.cwd()
     candidates.extend(
         [
             cwd / ".openclaw",
             cwd / "openclaw",
+            cwd / ".hermes",
+            cwd / "hermes",
             cwd / "memory",
             cwd / "memories",
             home / ".openclaw",
             home / ".config" / "openclaw",
             home / "AppData" / "Roaming" / "OpenClaw",
             home / "AppData" / "Local" / "OpenClaw",
+            home / ".hermes",
+            home / ".config" / "hermes",
+            home / "AppData" / "Roaming" / "Hermes",
+            home / "AppData" / "Local" / "Hermes",
         ]
     )
     return dedupe_paths(candidates)
@@ -356,7 +388,7 @@ def is_supported(path: Path) -> bool:
     name = path.name.lower()
     if path.suffix.lower() in SUPPORTED_EXTENSIONS:
         return True
-    return any(token in name for token in ("memory", "memories", "openclaw"))
+    return any(token in name for token in ("memory", "memories", "openclaw", "hermes"))
 
 
 def normalized_path_marker(value: str) -> str:
@@ -381,6 +413,12 @@ def has_openclaw_marker(markers: Iterable[str]) -> bool:
     )
 
 
+def has_hermes_marker(markers: Iterable[str]) -> bool:
+    """Return whether path markers indicate a Hermes-owned location."""
+
+    return any(marker in HERMES_MARKERS for marker in markers)
+
+
 def has_memory_marker(markers: Iterable[str]) -> bool:
     """Return whether path markers indicate a memory-owned location or file."""
 
@@ -390,6 +428,12 @@ def has_memory_marker(markers: Iterable[str]) -> bool:
         or "memories" in marker
         for marker in markers
     )
+
+
+def is_known_hermes_memory_file(path: Path) -> bool:
+    """Return whether the filename is a known Hermes memory artifact."""
+
+    return path.name in HERMES_MEMORY_FILENAMES
 
 
 def is_ignored_directory(path: Path, scan_root: Path | None = None) -> bool:
@@ -430,14 +474,21 @@ def is_explicit_memory_file(path: Path) -> bool:
         return False
     if is_rule_library_file(path):
         return False
-    return has_memory_marker(path_markers(path))
+    markers = path_markers(path)
+    if has_hermes_marker(markers):
+        return is_known_hermes_memory_file(path)
+    if is_known_hermes_memory_file(path):
+        return True
+    if has_memory_marker(markers):
+        return True
+    return False
 
 
 def is_openclaw_memory_file(path: Path, scan_root: Path | None = None) -> bool:
-    """Return true for files that look like OpenClaw memory artifacts.
+    """Return true for files that look like OpenClaw or Hermes memory artifacts.
 
     Directory scans are intentionally narrower than explicit single-file scans:
-    they require an OpenClaw context plus a memory path/name, or an explicitly
+    they require an app context plus a memory path/name, or an explicitly
     supplied memory directory root. This keeps broad paths from scanning every
     supported text file under the target.
     """
@@ -446,10 +497,14 @@ def is_openclaw_memory_file(path: Path, scan_root: Path | None = None) -> bool:
         return False
     if is_rule_library_file(path) or is_ignored_directory(path, scan_root):
         return False
+
+    markers = path_markers(path)
+    if has_hermes_marker(markers):
+        return is_known_hermes_memory_file(path)
+
     if scan_root is not None and is_memory_scan_root(scan_root):
         return True
 
-    markers = path_markers(path)
     has_openclaw = has_openclaw_marker(markers)
     has_memory = has_memory_marker(markers)
     if has_openclaw and has_memory:
@@ -823,6 +878,388 @@ def apply_llm_review(
     return reviewed
 
 
+def is_truncated_snippet(snippet: str) -> bool:
+    """Return whether a scanner snippet appears to start or end mid-record."""
+
+    stripped = snippet.strip()
+    if not stripped:
+        return True
+    if stripped.startswith(("...", "…")) or stripped.endswith(("...", "…")):
+        return True
+    first = stripped[0]
+    if first.islower() or first.isdigit():
+        return True
+    if re.search(r"[A-Za-z0-9]$", stripped):
+        return True
+    return False
+
+
+def normalize_evidence_text(text: str) -> str:
+    """Normalize and redact evidence after re-reading it from the source."""
+
+    normalized = text.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n").strip()
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    return redact_sensitive_text(normalized)
+
+
+def extract_text_record_at_line(text: str, line: int, suffix: str = "") -> str | None:
+    """Return a complete line or blank-line-delimited paragraph containing ``line``."""
+
+    normalized = text.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
+    lines = normalized.split("\n")
+    if not lines:
+        return None
+    index = min(max(line - 1, 0), len(lines) - 1)
+    if suffix.lower() == ".jsonl":
+        return lines[index].strip() or None
+
+    start = index
+    while start > 0 and lines[start - 1].strip():
+        start -= 1
+    end = index
+    while end + 1 < len(lines) and lines[end + 1].strip():
+        end += 1
+    paragraph = "\n".join(lines[start : end + 1]).strip()
+    return paragraph or lines[index].strip() or None
+
+
+def scanner_snippet_evidence(finding: Finding) -> EvidenceRecord:
+    """Fall back to the already-redacted scanner snippet and label it explicitly."""
+
+    text = normalize_evidence_text(finding.snippet) or "[no scanner evidence available]"
+    return EvidenceRecord(
+        text=text,
+        source_label="scanner-truncated evidence",
+        scanner_truncated=True,
+    )
+
+
+def resolve_evidence_record(finding: Finding) -> EvidenceRecord:
+    """Re-read the current source memory record for final reviewed reports.
+
+    Scanner snippets are review hints only. Final reviewed evidence should use
+    the complete source row, line, or paragraph whenever the source is available.
+    """
+
+    path = Path(finding.path)
+    if not path.exists():
+        return scanner_snippet_evidence(finding)
+
+    if path.suffix.lower() in SQLITE_EXTENSIONS and finding.source.startswith("sqlite:"):
+        sqlite_ok, records = extract_sqlite_text(path)
+        if sqlite_ok:
+            for source, text in records:
+                if source == finding.source:
+                    return EvidenceRecord(
+                        text=normalize_evidence_text(text),
+                        source_label="source memory record",
+                    )
+        return scanner_snippet_evidence(finding)
+
+    text = read_text(path)
+    if text is None:
+        return scanner_snippet_evidence(finding)
+    record = extract_text_record_at_line(text, finding.line, path.suffix)
+    if record is None:
+        return scanner_snippet_evidence(finding)
+    return EvidenceRecord(
+        text=normalize_evidence_text(record),
+        source_label="source memory record",
+    )
+
+
+def detect_report_language(
+    language: str | None = "auto",
+    user_request: str | None = None,
+) -> str:
+    """Choose the reviewed report language from user intent, then local locale."""
+
+    requested = (language or "auto").strip().lower()
+    if requested in {"zh", "zh-cn", "zh_hans", "chinese", "cn", "中文"}:
+        return "zh"
+    if requested in {"en", "en-us", "en_gb", "english"}:
+        return "en"
+    if user_request and re.search(r"[\u3400-\u9fff]", user_request):
+        return "zh"
+    locale_candidates = [
+        os.environ.get("LC_ALL", ""),
+        os.environ.get("LC_MESSAGES", ""),
+        os.environ.get("LANG", ""),
+        locale.getlocale()[0] or "",
+    ]
+    if any(candidate.lower().startswith("zh") for candidate in locale_candidates):
+        return "zh"
+    return "en"
+
+
+def reviewed_verdict(finding: Finding) -> str:
+    """Return a normalized reviewed verdict for report grouping."""
+
+    return normalize_llm_verdict(finding.llm_verdict or "uncertain")
+
+
+def markdown_table_cell(value: object) -> str:
+    """Escape compact table cell content without touching evidence blocks."""
+
+    return str(value).replace("|", "\\|").replace("\n", " ").strip()
+
+
+REVIEWED_REPORT_TEXT = {
+    "zh": {
+        "title": "# 已复核 OpenClaw/Hermes 推荐投毒报告",
+        "reviewed_on": "复核时间",
+        "source_note": "源扫描输出：已复核内部 scanner JSON；未披露原始 JSON",
+        "summary": "摘要",
+        "scan_status": "扫描状态",
+        "scan_message": "扫描说明",
+        "scanned_paths": "扫描路径",
+        "scanned_files": "扫描文件数",
+        "regex_candidates": "已复核 regex 候选数",
+        "suspicious": "复核后可疑",
+        "uncertain": "需人工检查",
+        "benign": "良性/已抑制",
+        "method": "复核方法",
+        "method_text": "每个 regex 命中都先视为候选而非证据。复核时检查商业、经济价值、推荐、排名、引用或流量导向上下文，再判断是否存在持久化记忆、信任注入、引用偏置或推荐操控。Scanner 分数只用于排序和溯源，最终结论以复核标签为准。",
+        "suspicious_findings": "可疑发现",
+        "uncertain_findings": "需人工检查",
+        "benign_findings": "良性/已抑制",
+        "detailed_evidence": "详细证据",
+        "evidence_index": "证据索引",
+        "no_suspicious": "没有复核后仍为可疑的候选。",
+        "no_uncertain": "没有需要人工检查的候选。",
+        "benign_summary": "良性或被抑制的候选只计数汇总，不在详细证据中重复展开。",
+        "number": "编号",
+        "verdict": "结论",
+        "severity": "严重度",
+        "score": "分数",
+        "file": "文件",
+        "categories": "类别",
+        "evidence": "证据",
+        "line": "行号",
+        "source": "Source",
+        "matched_terms": "Matched terms",
+        "evidence_source": "证据来源",
+        "review_reason": "复核理由",
+        "source_record": "源 memory 记录",
+        "scanner_truncated": "扫描器截断证据",
+        "cleanup": "建议处理",
+        "cleanup_items": [
+            "隔离或删除复核后仍可疑的 memory 记录。",
+            "如果存在 memory 索引，删除后重建或刷新索引。",
+            "清理后重新运行扫描，确认可疑计数下降。",
+            "用中性提示验证受影响主题的推荐和引用行为。",
+        ],
+    },
+    "en": {
+        "title": "# Reviewed OpenClaw/Hermes Recommendation Poisoning Report",
+        "reviewed_on": "Reviewed on",
+        "source_note": "Source scanner output: internal scanner JSON reviewed; raw JSON not disclosed",
+        "summary": "Summary",
+        "scan_status": "Scan status",
+        "scan_message": "Scan message",
+        "scanned_paths": "Scanned paths",
+        "scanned_files": "Scanned files",
+        "regex_candidates": "Regex candidates reviewed",
+        "suspicious": "Reviewed suspicious",
+        "uncertain": "Reviewed uncertain",
+        "benign": "Reviewed benign/suppressed",
+        "method": "Review Method",
+        "method_text": "Every regex hit was treated as a candidate, not proof. Review checked for commercial, economic-value, recommendation, ranking, citation, or traffic-steering context, then judged whether the record persisted memory, trust injection, citation bias, or recommendation manipulation. Scanner scores are only triage and sorting values; the reviewed label is authoritative.",
+        "suspicious_findings": "Suspicious Findings",
+        "uncertain_findings": "Uncertain Findings",
+        "benign_findings": "Benign/Suppressed",
+        "detailed_evidence": "Detailed Evidence",
+        "evidence_index": "Evidence Index",
+        "no_suspicious": "No reviewed candidates remained suspicious.",
+        "no_uncertain": "No candidates require manual inspection.",
+        "benign_summary": "Benign or suppressed candidates are counted here and not repeated in detailed evidence.",
+        "number": "#",
+        "verdict": "Verdict",
+        "severity": "Severity",
+        "score": "Score",
+        "file": "File",
+        "categories": "Categories",
+        "evidence": "Evidence",
+        "line": "Line",
+        "source": "Source",
+        "matched_terms": "Matched terms",
+        "evidence_source": "Evidence source",
+        "review_reason": "Review reason",
+        "source_record": "source memory record",
+        "scanner_truncated": "scanner-truncated evidence",
+        "cleanup": "Recommended Cleanup",
+        "cleanup_items": [
+            "Quarantine or delete memory records that remain suspicious after review.",
+            "Rebuild or refresh any memory index after deleting records.",
+            "Re-run the scan after cleanup and confirm the suspicious count drops.",
+            "Validate recommendation and citation behavior with neutral prompts in affected topics.",
+        ],
+    },
+}
+
+
+def render_reviewed_markdown_report(
+    paths: list[Path],
+    scanned_files: int,
+    findings: list[Finding],
+    *,
+    candidate_count: int | None = None,
+    benign_suppressed: int = 0,
+    scan_status: str = "ok",
+    missing_paths: Iterable[Path] | None = None,
+    scan_message: str | None = None,
+    reviewed_on: str | None = None,
+    language: str | None = "auto",
+    user_request: str | None = None,
+) -> str:
+    """Render the final user-facing reviewed report in a stable localized format."""
+
+    report_language = detect_report_language(language=language, user_request=user_request)
+    text = REVIEWED_REPORT_TEXT[report_language]
+    reviewed_on = reviewed_on or date.today().isoformat()
+    message = scan_message or SCAN_STATUS_MESSAGES.get(scan_status, "")
+    sorted_findings = sorted(findings, key=lambda item: (-item.score, item.path, item.line))
+    benign_included = sum(1 for finding in sorted_findings if reviewed_verdict(finding) == "benign")
+    benign_total = benign_suppressed + benign_included
+    report_findings = [
+        finding for finding in sorted_findings if reviewed_verdict(finding) != "benign"
+    ]
+    suspicious_findings = [
+        finding for finding in report_findings if reviewed_verdict(finding) == "suspicious"
+    ]
+    uncertain_findings = [
+        finding for finding in report_findings if reviewed_verdict(finding) == "uncertain"
+    ]
+    reviewed_count = candidate_count if candidate_count is not None else len(findings) + benign_suppressed
+    path_text = ", ".join(f"`{path}`" for path in paths) if paths else "`(none)`"
+
+    lines = [
+        text["title"],
+        "",
+        f"{text['reviewed_on']}: {reviewed_on}",
+        text["source_note"],
+        "",
+        f"## {text['summary']}",
+        "",
+        f"- {text['scan_status']}: `{scan_status}`",
+        f"- {text['scan_message']}: {message}",
+        f"- {text['scanned_paths']}: {path_text}",
+        f"- {text['scanned_files']}: {scanned_files}",
+        f"- {text['regex_candidates']}: {reviewed_count}",
+        f"- {text['suspicious']}: {len(suspicious_findings)}",
+        f"- {text['uncertain']}: {len(uncertain_findings)}",
+        f"- {text['benign']}: {benign_total}",
+        f"- SQLite row limit per table: {SQLITE_ROW_LIMIT}",
+        "",
+    ]
+    missing_path_list = [str(path) for path in missing_paths or []]
+    if missing_path_list:
+        missing_label = "缺失路径" if report_language == "zh" else "Missing paths"
+        lines.extend([f"{missing_label}:"] + [f"- `{path}`" for path in missing_path_list] + [""])
+
+    lines.extend(
+        [
+            f"## {text['method']}",
+            "",
+            text["method_text"],
+            "",
+            f"## {text['suspicious_findings']}",
+            "",
+            (
+                f"{len(suspicious_findings)} "
+                + ("个候选复核后仍为可疑。" if report_language == "zh" else "reviewed candidate(s) remained suspicious.")
+                if suspicious_findings
+                else text["no_suspicious"]
+            ),
+            "",
+            f"## {text['uncertain_findings']}",
+            "",
+            (
+                f"{len(uncertain_findings)} "
+                + ("个候选需要人工检查。" if report_language == "zh" else "candidate(s) need manual inspection.")
+                if uncertain_findings
+                else text["no_uncertain"]
+            ),
+            "",
+            f"## {text['benign_findings']}",
+            "",
+            f"{text['benign']}: {benign_total}. {text['benign_summary']}",
+            "",
+            f"## {text['detailed_evidence']}",
+            "",
+        ]
+    )
+
+    if report_findings:
+        lines.extend(
+            [
+                f"{text['evidence_index']}:",
+                "",
+                f"| {text['number']} | {text['verdict']} | {text['severity']} | {text['score']} | {text['file']} | {text['categories']} |",
+                "|---:|---|---|---:|---|---|",
+            ]
+        )
+        for index, finding in enumerate(report_findings, start=1):
+            categories = ", ".join(finding.categories)
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        str(index),
+                        f"`{markdown_table_cell(reviewed_verdict(finding))}`",
+                        f"`{markdown_table_cell(finding.severity)}`",
+                        str(finding.score),
+                        f"`{markdown_table_cell(Path(finding.path).name)}`",
+                        markdown_table_cell(categories),
+                    ]
+                )
+                + " |"
+            )
+        lines.append("")
+
+        for index, finding in enumerate(report_findings, start=1):
+            evidence = resolve_evidence_record(finding)
+            evidence_label = (
+                text["scanner_truncated"] if evidence.scanner_truncated else text["source_record"]
+            )
+            matched_terms = ", ".join(f"`{term}`" for term in finding.matched_terms) or "`(none)`"
+            reason = finding.llm_reason or (
+                "需要人工检查。" if report_language == "zh" else "Manual inspection needed."
+            )
+            lines.extend(
+                [
+                    f"### {text['evidence']} {index}",
+                    "",
+                    f"- {text['verdict']}: `{reviewed_verdict(finding)}`",
+                    f"- {text['file']}: `{Path(finding.path).name}`",
+                    f"- {text['line']}: {finding.line}",
+                    f"- {text['source']}: `{finding.source}`",
+                    f"- {text['matched_terms']}: {matched_terms}",
+                    f"- {text['evidence_source']}: {evidence_label}",
+                    f"- {text['review_reason']}: {reason}",
+                    "",
+                    "```text",
+                    evidence.text,
+                    "```",
+                    "",
+                ]
+            )
+    else:
+        lines.extend(
+            [
+                "No non-benign reviewed evidence."
+                if report_language == "en"
+                else "没有需要展开的非良性证据。",
+                "",
+            ]
+        )
+
+    lines.extend([f"## {text['cleanup']}", ""])
+    for index, item in enumerate(text["cleanup_items"], start=1):
+        lines.append(f"{index}. {item}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def render_markdown(
     paths: list[Path],
     scanned_files: int,
@@ -837,7 +1274,7 @@ def render_markdown(
     missing_path_list = [str(path) for path in missing_paths or []]
     message = scan_message or SCAN_STATUS_MESSAGES.get(scan_status, "")
     lines = [
-        "# OpenClaw Recommendation Poisoning Regex Candidate Scan",
+        "# OpenClaw/Hermes Recommendation Poisoning Regex Candidate Scan",
         "",
         f"Scan status: {scan_status}",
         f"Scan message: {message}",
@@ -854,9 +1291,9 @@ def render_markdown(
         if scan_status == "no_memory_files":
             lines.extend(
                 [
-                    "No OpenClaw memory files were found, so no memory content was scanned.",
+                    "No OpenClaw or Hermes memory files were found, so no memory content was scanned.",
                     "",
-                    "Provide an OpenClaw memory file or an OpenClaw memory directory and run the scanner again.",
+                    "Provide an OpenClaw or Hermes memory file or directory and run the scanner again.",
                 ]
             )
             return "\n".join(lines)
@@ -983,9 +1420,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     """解析命令行参数。"""
 
     parser = argparse.ArgumentParser(
-        description="Scan OpenClaw memory files for recommendation poisoning indicators."
+        description="Scan OpenClaw and Hermes memory files for recommendation poisoning indicators."
     )
-    parser.add_argument("paths", nargs="*", help="OpenClaw memory files or directories to scan.")
+    parser.add_argument("paths", nargs="*", help="OpenClaw or Hermes memory files or directories to scan.")
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of Markdown.")
     parser.add_argument("--output", "-o", help="Write output to a file instead of stdout.")
     parser.add_argument("--verbose", "-v", action="store_true", help="Print detailed scan logs to stderr.")
@@ -1047,7 +1484,7 @@ def main(argv: list[str]) -> int:
 
     args = parse_args(argv)
     configure_logging(verbose=args.verbose, quiet=args.quiet)
-    LOGGER.info("Starting OpenClaw recommendation-poisoning memory scan")
+    LOGGER.info("Starting OpenClaw/Hermes recommendation-poisoning memory scan")
     rules = load_csv_rules(args.rules)
     explicit_paths = bool(args.paths)
     paths = dedupe_paths(Path(path) for path in args.paths) if args.paths else default_paths()
