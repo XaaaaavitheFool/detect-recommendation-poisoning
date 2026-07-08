@@ -1,4 +1,4 @@
 interface:
-  display_name: "Detect Recommendation Poisoning"
-  short_description: "Scan OpenClaw memory files for recommendation poisoning signals."
-  default_prompt: "Scan the OpenClaw memory files for recommendation poisoning and report suspicious findings."
+  display_name: "Detect Hermes Recommendation Poisoning"
+  short_description: "Review Hermes Markdown memory files for recommendation poisoning."
+  default_prompt: "Use $detect-recommendation-poisoning to review my Hermes USER.md-style memory files for recommendation poisoning and write a Markdown findings report."
