@@ -1,4 +1,4 @@
 interface:
   display_name: "Detect Hermes Recommendation Poisoning"
-  short_description: "Review Hermes Markdown memory files for recommendation poisoning."
-  default_prompt: "Use $detect-recommendation-poisoning to review my Hermes USER.md-style memory files for recommendation poisoning and write a Markdown findings report."
+  short_description: "Sequentially review every Hermes memory record for recommendation poisoning."
+  default_prompt: "Use $detect-recommendation-poisoning to sequentially review every record in my Hermes USER.md-style memory files for recommendation poisoning and write a Markdown findings report."
