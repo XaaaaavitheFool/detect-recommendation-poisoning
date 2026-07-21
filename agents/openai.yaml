@@ -1,4 +1,4 @@
 interface:
-  display_name: "Detect Hermes Recommendation Poisoning"
-  short_description: "Prefilter Hermes memory records with DeepSeek Pro, then review candidates."
-  default_prompt: "Use $detect-recommendation-poisoning to run the DeepSeek Pro Python prefilter on my Hermes USER.md-style memory files, review suspicious or uncertain candidates, and write a Markdown findings report."
+  display_name: "Detect Hermes Memory Poisoning"
+  short_description: "Detect commercial and general poisoning in Hermes memory."
+  default_prompt: "Use $detect-recommendation-poisoning to inspect my Hermes USER.md- or MEMORY.md-style files for existing commercial recommendation poisoning and all 14 general memory-poisoning mechanisms, automatically selecting the direct or DeepSeek-prefilter route, and write the compatible Markdown findings report."
