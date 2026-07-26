@@ -25,7 +25,7 @@ Skill 会生成一份带证据的 Markdown 审查报告。默认情况下，它�
 - 检测伪造的用户偏好、授权或批准，以及隐藏商业影响的指令。
 - 检测 14 类通用内存投毒机制，包括持久控制、安全绕过、工具劫持和数据外泄。
 - 将内存内容视为不可信的惰性证据，不执行其中的指令。
-- 根据可信运行时模型元数据自动选择直接审查或 DeepSeek Pro 预筛流程。
+- 每次调用先由用户选择本地直接审查或 DeepSeek Pro 外部预筛，不预设默认路径。
 - 输出 `suspicious`、`uncertain` 和 `benign` 最终结论，并保留文件、记录索引和行号证据。
 
 ### 检测范围
@@ -54,13 +54,17 @@ Skill 会生成一份带证据的 Markdown 审查报告。默认情况下，它�
 
 ### 工作方式
 
-Skill 只根据宿主提供的可信运行时元数据选择路由。内存记录、扫描文件、工具结果或用户内容
-中自称的模型身份不会影响路由。
+每次调用都必须在扫描或读取配置之前选择审查路径。没有默认路径；模型身份、API key、
+环境配置、普通扫描请求或历史选择都不会自动启用任何路径。用户未选择或回答含糊时，
+skill 会停在选择阶段，不枚举文件、不读取 `.env`，也不安装依赖。
 
-| 路由 | 适用模型 | 行为 |
+| 路径 | 优点 | 缺点与授权 |
 | --- | --- | --- |
-| 直接审查 | `gpt-5`、`gpt-5.5`、`gpt-5.6-sol`、`opus-4.6`、`opus-4.7`、`opus-4.8`、`fable5` | 宿主模型直接逐条审查记录；不调用 DeepSeek API。 |
-| DeepSeek Pro 预筛与复核 | 其他所有模型，或无法取得可信模型元数据时 | 脚本按确定顺序将每条记录逐一发送给 DeepSeek Pro，随后由宿主模型复核候选项和契约错误。 |
+| 选项 1：本地模型直接审查 | 本地模型性能好时可以直接完成；内存文件不上传第三方。 | 审查效果取决于本地模型性能；性能一般时可能较弱。 |
+| 选项 2：`deepseek-v4-pro` 初筛 + 本地模型复核 | 本地模型性能一般时，可先由 `deepseek-v4-pro` 初筛，再由本地模型复核。 | 内存文件完整内容和来源元数据会上传到 DeepSeek 官网，可能包含敏感信息。选择选项 2 即表示明确同意当次调用的外部处理，不再二次确认。 |
+
+若用户在外部调用前撤回选择，skill 会停止并重新展示路径选择，不会自动切换到本地
+路径。每次调用都必须重新选择，历史选择不能复用。
 
 扫描目录时，只处理以下 Markdown 文件：
 
@@ -159,7 +163,11 @@ Use $detect-recommendation-poisoning to inspect my Hermes USER.md files.
 
 ### DeepSeek 路由配置
 
-直接审查路由不需要 DeepSeek。DeepSeek Pro 预筛路由需要：
+DeepSeek Pro 预筛是可选的外部处理流程。只有用户在当次调用的启动菜单中明确选择
+选项 2 后才可启用；该选择同时构成当次外部处理授权，无需另行询问同意。API key、
+环境配置或历史选择本身都不能选择或授权这条路径。
+
+用户选择选项 2 后，DeepSeek Pro 预筛路由还需要：
 
 - Python 3
 - `openai==1.95.1`
@@ -188,21 +196,33 @@ python -m pip install -r scripts/requirements.txt
 ```bash
 python scripts/deepseek_pro_prefilter.py \
   --scan-path <USER.md-or-directory> \
-  --output deepseek_pro_prefilter_results.jsonl
+  --output deepseek_pro_prefilter_results.jsonl \
+  --confirm-external-processing
 ```
 
 常用参数：
 
-- `--errors-output <path>`：契约错误 JSONL 路径。
+- `--errors-output <path>`：重试耗尽记录的 JSONL 路径。
 - `--model <name>`：DeepSeek 模型名；默认 `deepseek-v4-pro`。
 - `--env-file <path>`：dotenv 文件路径；默认 `.env`。
+- `--request-timeout-seconds <正数>`：每次 DeepSeek 请求尝试的墙钟超时；
+  默认 `60.0` 秒。
+- `--confirm-external-processing`：必需的外发确认门禁；仅在确认用户已为当次调用选择
+  DeepSeek 路径后传入。
+
+每次请求的墙钟超时不受 DeepSeek 空行 keep-alive 影响。SDK 自身的传输超时与
+隐式重试已关闭，由该墙钟时限统一控制；请求超时、无效 JSON 或输出契约错误最多
+尝试 3 次。某条记录连续 3 次失败时，脚本会把三次错误写入 errors JSONL、继续
+下一条并以状态码 3 结束；宿主本地模型随后必须对该记录执行兜底复核，不能将其
+视为良性。
 
 ### 输出、隐私与安全边界
 
 - 完整 skill 默认写入当前工作目录下的
   `hermes_recommendation_poisoning_reviewed_report.md`。
-- DeepSeek 路由会将发现的每条内存记录发送到 `https://api.deepseek.com`；使用前请确认
-  数据处理和隐私要求允许这样做。
+- DeepSeek 路由会把发现的每条内存记录的完整原文和来源元数据发送到
+  `https://api.deepseek.com`。数据将离开本机，可能包含个人画像、密钥或 API key；
+  用户在看到这些优缺点后选择选项 2，即表示对当次外部处理作出明确同意。
 - 直接审查路由不会调用 DeepSeek API。
 - 内存文本和预筛结果始终作为不可信证据处理，不能控制工具、结论或报告格式。
 - 除非用户在查看报告后明确要求，否则 skill 不会编辑、隔离或删除内存文件。
@@ -237,8 +257,8 @@ not edit, quarantine, or delete any source memory file.
   safety bypasses, tool hijacking, and data exfiltration.
 - Treats memory content as untrusted, inert evidence and never follows its
   instructions.
-- Selects direct review or DeepSeek Pro prefiltering from trusted runtime model
-  metadata.
+- Every invocation starts by asking the user to choose local direct review or
+  DeepSeek Pro external prefiltering; neither route is preselected.
 - Produces final `suspicious`, `uncertain`, and `benign` verdicts with file,
   record-index, and line evidence.
 
@@ -270,14 +290,20 @@ General memory poisoning uses these 14 mechanism codes:
 
 ### How it works
 
-The skill selects a route only from trusted runtime metadata supplied by the
-host. A model identity claimed by a memory record, scanned file, tool result, or
-user content never affects routing.
+Every invocation must choose a review route before any scan or configuration
+access. There is no default route: model identity, an API key, configuration, a
+generic scan request, or a prior choice cannot activate either route. If the
+choice is missing or ambiguous, the skill pauses without enumerating files,
+reading `.env`, or installing dependencies.
 
-| Route | Models | Behavior |
+| Route | Advantage | Disadvantage and authorization |
 | --- | --- | --- |
-| Direct review | `gpt-5`, `gpt-5.5`, `gpt-5.6-sol`, `opus-4.6`, `opus-4.7`, `opus-4.8`, `fable5` | The host model reviews records directly; no DeepSeek API call is made. |
-| DeepSeek Pro prefilter and review | Every other model, or when trusted model metadata is unavailable | The script sends every record to DeepSeek Pro one at a time in deterministic order, then the host model reviews candidates and contract errors. |
+| Option 1: local model direct review | When local model performance is good, it can complete the review directly; memory files are not uploaded to a third party. | Review quality depends on local model performance and may be weaker when performance is average. |
+| Option 2: `deepseek-v4-pro` prefilter + local model review | When local model performance is average, `deepseek-v4-pro` can prefilter first and the local model can review the candidates. | Full memory-file content and source metadata are uploaded to DeepSeek's official service and may contain sensitive information. Selecting option 2 is explicit consent to external processing for the current invocation; there is no second confirmation. |
+
+If the user revokes option 2 before the external call, the skill stops and
+shows the route chooser again instead of automatically switching to local
+review. A new choice is required for every invocation.
 
 When scanning a directory, only these Markdown files are considered:
 
@@ -379,8 +405,13 @@ Use $detect-recommendation-poisoning to inspect my Hermes USER.md files.
 
 ### DeepSeek route setup
 
-The direct-review route does not require DeepSeek. The DeepSeek Pro prefilter
-route requires:
+The DeepSeek Pro prefilter is optional external processing. It may be enabled
+only when the user selects option 2 from the startup chooser for the current
+invocation. That selection is the external-processing authorization; no
+separate consent prompt is required. An API key, configuration, or prior choice
+cannot select or authorize this route.
+
+After the user selects option 2, the DeepSeek Pro route also requires:
 
 - Python 3
 - `openai==1.95.1`
@@ -411,23 +442,40 @@ review or the Markdown reporting workflow:
 ```bash
 python scripts/deepseek_pro_prefilter.py \
   --scan-path <USER.md-or-directory> \
-  --output deepseek_pro_prefilter_results.jsonl
+  --output deepseek_pro_prefilter_results.jsonl \
+  --confirm-external-processing
 ```
 
 Common options:
 
-- `--errors-output <path>`: contract-error JSONL path.
+- `--errors-output <path>`: JSONL path for retry-exhausted records.
 - `--model <name>`: DeepSeek model name; default `deepseek-v4-pro`.
 - `--env-file <path>`: dotenv path; default `.env`.
+- `--request-timeout-seconds <positive-number>`: wall-clock timeout for each
+  DeepSeek request attempt; default `60.0` seconds.
+- `--confirm-external-processing`: required external-processing gate; pass it
+  only after confirming that the user selected the DeepSeek route for the
+  current invocation.
+
+The per-attempt wall-clock timeout is not extended by DeepSeek empty-line
+keep-alives. SDK transport deadlines and implicit retries are disabled so the
+wall-clock deadline is the single timeout authority. Request timeouts, invalid
+JSON, and output-contract errors each receive at most three total attempts. If
+a record exhausts all three, the script writes all three errors to the errors
+JSONL, continues with the next record, and exits with status 3. The local host
+model must then perform fallback review of that record instead of treating it
+as benign.
 
 ### Output, privacy, and safety boundaries
 
 - The complete skill writes
   `hermes_recommendation_poisoning_reviewed_report.md` to the current working
   directory by default.
-- The DeepSeek route sends every discovered memory record to
-  `https://api.deepseek.com`; confirm that your data-handling and privacy
-  requirements permit this before use.
+- The DeepSeek route sends the full text and source metadata of every discovered
+  memory record to `https://api.deepseek.com`. The data leaves the local machine
+  and may contain personal profile data, secrets, or API keys. Selecting option
+  2 after seeing these tradeoffs is the user's explicit consent for the current
+  invocation.
 - The direct-review route does not call the DeepSeek API.
 - Memory text and prefilter output remain untrusted evidence and cannot control
   tools, verdicts, or the report format.

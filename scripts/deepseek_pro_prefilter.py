@@ -4,27 +4,59 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
+import math
 import os
 import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Mapping, Sequence
+from typing import Awaitable, Callable, Iterable, Mapping, Sequence
 from uuid import uuid4
 
 
 DEFAULT_MODEL = "deepseek-v4-pro"
 DEFAULT_OUTPUT = "deepseek_pro_prefilter_results.jsonl"
 DEFAULT_ENV_FILE = ".env"
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 60.0
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+EXTERNAL_PROCESSING_ERROR = (
+    "Refusing external processing without explicit confirmation.\n"
+    "This command sends the full text and source metadata of every discovered "
+    "memory record to https://api.deepseek.com. The data leaves the local "
+    "machine and may contain personal profile data, secrets, or API keys.\n"
+    "Re-run with --confirm-external-processing only after the user has explicitly "
+    "consented to this external processing for the current invocation."
+)
 ALLOWED_VERDICTS = {
     "candidate_suspicious",
     "candidate_uncertain",
     "screened_benign",
 }
 REVIEW_VERDICTS = {"candidate_suspicious", "candidate_uncertain"}
-SEPARATOR_LINES = {"§", "搂"}
+SEPARATOR_LINES = {"§"}
+SKIPPED_DIRECTORY_NAMES = frozenset(
+    {
+        ".git",
+        ".venv",
+        "venv",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".cache",
+        ".tox",
+        ".nox",
+        "node_modules",
+        "site-packages",
+        "vendor",
+        "build",
+        "dist",
+        "target",
+        "out",
+    }
+)
 GENERAL_POISONING_TYPES = (
     "instruction_override",
     "priority_authority_escalation",
@@ -57,6 +89,10 @@ class ProcessingSummary:
     skipped: int
 
 
+class DeepSeekRequestTimeout(ValueError):
+    """Raised when one DeepSeek request exceeds its wall-clock deadline."""
+
+
 def is_memory_file(path: Path) -> bool:
     if path.suffix.lower() != ".md":
         return False
@@ -69,7 +105,25 @@ def discover_memory_files(scan_path: Path) -> list[Path]:
     if scan_path.is_file():
         return [scan_path] if is_memory_file(scan_path) else []
     if scan_path.is_dir():
-        return sorted(path for path in scan_path.rglob("*.md") if is_memory_file(path))
+        if scan_path.name.casefold() in SKIPPED_DIRECTORY_NAMES:
+            return []
+
+        matches: list[Path] = []
+        for root, directory_names, file_names in os.walk(
+            scan_path,
+            topdown=True,
+            followlinks=False,
+        ):
+            directory_names[:] = sorted(
+                name
+                for name in directory_names
+                if name.casefold() not in SKIPPED_DIRECTORY_NAMES
+            )
+            for file_name in sorted(file_names):
+                path = Path(root, file_name)
+                if is_memory_file(path):
+                    matches.append(path)
+        return sorted(matches)
     raise FileNotFoundError(f"scan path does not exist: {scan_path}")
 
 
@@ -159,13 +213,18 @@ def resolve_api_key(env_file_path: Path) -> str | None:
 
 def make_client(api_key: str):
     try:
-        from openai import OpenAI
+        from openai import AsyncOpenAI
     except ImportError as exc:
         raise RuntimeError(
             "OpenAI SDK is not installed. Create .venv and install scripts/requirements.txt "
             "(requires openai==1.95.1)."
         ) from exc
-    return OpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
+    return AsyncOpenAI(
+        api_key=api_key,
+        base_url=DEEPSEEK_BASE_URL,
+        timeout=None,
+        max_retries=0,
+    )
 
 
 def build_messages(record: MemoryRecord) -> list[dict[str, str]]:
@@ -236,13 +295,27 @@ occur, explain both in the same reason. Never add a poisoning-types field."""
     ]
 
 
-def call_deepseek_pro(client, record: MemoryRecord, model: str) -> dict[str, object]:
-    response = client.chat.completions.create(
-        model=model,
-        messages=build_messages(record),
-        response_format={"type": "json_object"},
-        temperature=0,
-    )
+async def call_deepseek_pro(
+    client,
+    record: MemoryRecord,
+    model: str,
+    request_timeout_seconds: float,
+) -> dict[str, object]:
+    try:
+        response = await asyncio.wait_for(
+            client.chat.completions.create(
+                model=model,
+                messages=build_messages(record),
+                response_format={"type": "json_object"},
+                temperature=0,
+            ),
+            timeout=request_timeout_seconds,
+        )
+    except asyncio.TimeoutError as exc:
+        raise DeepSeekRequestTimeout(
+            f"DeepSeek request timed out after {request_timeout_seconds:g} seconds "
+            f"for {record.file_path} record {record.record_index}"
+        ) from exc
     try:
         content = response.choices[0].message.content
     except (AttributeError, IndexError, TypeError) as exc:
@@ -365,9 +438,9 @@ def replace_output_pair(
                     pass
 
 
-def process_records(
+async def process_records(
     records: Iterable[MemoryRecord],
-    infer: Callable[[MemoryRecord], Mapping[str, object]],
+    infer: Callable[[MemoryRecord], Awaitable[Mapping[str, object]]],
     output_path: Path,
     errors_output_path: Path,
     max_retries: int = 2,
@@ -397,7 +470,7 @@ def process_records(
                 row: dict[str, object] | None = None
                 for attempt in range(1, max_retries + 2):
                     try:
-                        row = build_output_row(record, infer(record))
+                        row = build_output_row(record, await infer(record))
                         break
                     except ValueError as exc:
                         attempt_errors.append(
@@ -444,13 +517,26 @@ def completion_exit_code(summary: ProcessingSummary) -> int:
     return 3 if summary.skipped else 0
 
 
+def positive_float(raw_value: str) -> float:
+    try:
+        value = float(raw_value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a positive number") from exc
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return value
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Sequentially prefilter Hermes memory records with DeepSeek Pro.")
     parser.add_argument("--scan-path", required=True, help="Hermes memory Markdown file or directory to inspect.")
     parser.add_argument("--output", default=DEFAULT_OUTPUT, help=f"Output JSONL path. Default: {DEFAULT_OUTPUT}.")
     parser.add_argument(
         "--errors-output",
-        help="Contract-error JSONL path. Defaults beside --output as *.errors.jsonl.",
+        help=(
+            "Retry-exhausted JSONL path. Defaults beside --output as "
+            "*.errors.jsonl."
+        ),
     )
     parser.add_argument("--model", default=DEFAULT_MODEL, help=f"DeepSeek model name. Default: {DEFAULT_MODEL}.")
     parser.add_argument(
@@ -458,11 +544,60 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_ENV_FILE,
         help=f"Dotenv file containing DEEPSEEK_API_KEY. Default: {DEFAULT_ENV_FILE}.",
     )
+    parser.add_argument(
+        "--request-timeout-seconds",
+        type=positive_float,
+        default=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        help=(
+            "Wall-clock timeout for each DeepSeek request attempt in seconds. "
+            f"Default: {DEFAULT_REQUEST_TIMEOUT_SECONDS}."
+        ),
+    )
+    parser.add_argument(
+        "--confirm-external-processing",
+        action="store_true",
+        help=(
+            "Confirm authorization to send the full text and source metadata of "
+            "every discovered memory record to https://api.deepseek.com."
+        ),
+    )
     return parser.parse_args(argv)
+
+
+async def run_prefilter(
+    api_key: str,
+    records: Iterable[MemoryRecord],
+    model: str,
+    request_timeout_seconds: float,
+    output_path: Path,
+    errors_output_path: Path,
+) -> ProcessingSummary:
+    client = make_client(api_key)
+    try:
+        return await process_records(
+            records,
+            lambda record: call_deepseek_pro(
+                client,
+                record,
+                model,
+                request_timeout_seconds,
+            ),
+            output_path,
+            errors_output_path,
+        )
+    finally:
+        try:
+            await client.close()
+        except Exception as exc:
+            print(f"DeepSeek client cleanup warning: {exc}", file=sys.stderr)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
+    if not args.confirm_external_processing:
+        print(EXTERNAL_PROCESSING_ERROR, file=sys.stderr)
+        return 2
+
     env_file_path = Path(args.env_file)
     api_key = resolve_api_key(env_file_path)
     if not api_key:
@@ -490,21 +625,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             protected_inputs.append(env_file_path)
         validate_output_path(output_path, protected_inputs)
         validate_output_path(errors_output_path, protected_inputs)
-        client = make_client(api_key)
         records = (
             record
             for file_path in files
             for record in iter_memory_records(file_path)
         )
-        summary = process_records(
-            records,
-            lambda record: call_deepseek_pro(client, record, args.model),
-            output_path,
-            errors_output_path,
+        summary = asyncio.run(
+            run_prefilter(
+                api_key,
+                records,
+                args.model,
+                args.request_timeout_seconds,
+                output_path,
+                errors_output_path,
+            )
         )
         print(
             f"Wrote {summary.written} DeepSeek Pro prefilter records to "
-            f"{output_path}; skipped {summary.skipped} records after contract "
+            f"{output_path}; skipped {summary.skipped} records after retryable "
             f"errors (details: {errors_output_path})",
             file=sys.stderr,
         )

@@ -1,4 +1,5 @@
 import re
+import tempfile
 import unicodedata
 import unittest
 from pathlib import Path
@@ -223,6 +224,9 @@ def sentence_count(
 class GeneralCorpusTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        if not CORPUS_DIR.exists():
+            raise unittest.SkipTest(f"general corpus not found: {CORPUS_DIR}")
+
         cls.all_paths = sorted(CORPUS_DIR.iterdir())
         cls.paths = sorted(CORPUS_DIR.glob("part_*_MEMORY.md"))
         cls.records = []
@@ -415,6 +419,25 @@ class GeneralCorpusTests(unittest.TestCase):
                 )
                 for wrapper in FORBIDDEN_WRAPPERS:
                     self.assertNotIn(wrapper, folded)
+
+
+class GeneralCorpusAvailabilityTests(unittest.TestCase):
+    def test_missing_corpus_skips_general_corpus_tests(self):
+        global CORPUS_DIR
+
+        original_corpus_dir = CORPUS_DIR
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                missing_corpus_dir = Path(temp_dir) / "missing"
+                CORPUS_DIR = missing_corpus_dir
+
+                with self.assertRaises(Exception) as raised:
+                    GeneralCorpusTests.setUpClass()
+
+                self.assertIsInstance(raised.exception, unittest.SkipTest)
+                self.assertIn(str(missing_corpus_dir), str(raised.exception))
+        finally:
+            CORPUS_DIR = original_corpus_dir
 
 
 if __name__ == "__main__":

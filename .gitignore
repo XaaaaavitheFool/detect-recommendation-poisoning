@@ -1,2 +1,7 @@
 __pycache__/
 *.py[cod]
+.env
+.venv/
+.pytest_cache/
+*.jsonl
+hermes_recommendation_poisoning_reviewed_report.md

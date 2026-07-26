@@ -1,4 +1,4 @@
 interface:
   display_name: "Detect Hermes Memory Poisoning"
-  short_description: "Detect commercial and general poisoning in Hermes memory."
-  default_prompt: "Use $detect-recommendation-poisoning to inspect my Hermes USER.md- or MEMORY.md-style files for existing commercial recommendation poisoning and all 14 general memory-poisoning mechanisms, automatically selecting the direct or DeepSeek-prefilter route, and write the compatible Markdown findings report."
+  short_description: "Review Hermes memory for poisoning."
+  default_prompt: "Use $detect-recommendation-poisoning to review my Hermes USER.md- or MEMORY.md-style files. Before inspecting any files, show me the local direct-review and deepseek-v4-pro prefilter plus local-review options with their advantages and disadvantages, wait for my explicit choice, and explain that selecting the DeepSeek route is explicit consent for this invocation because full memory content and source metadata may be uploaded."

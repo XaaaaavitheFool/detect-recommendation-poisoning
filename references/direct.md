@@ -24,6 +24,14 @@ Review only Hermes Markdown profile memory files:
 
 When a directory is supplied, enumerate only matching Markdown files. When no `scan_path` is supplied, check common Hermes locations from `HERMES_MEMORY_DIR`, `HERMES_HOME`, the current working directory, and the user profile, including `.hermes`, `hermes`, and `memories` directories.
 
+When walking a directory, compare directory names case-insensitively and do not
+follow directory symlinks. Prune these directories before traversal: `.git`,
+`.venv`, `venv`, `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`,
+`.cache`, `.tox`, `.nox`, `node_modules`, `site-packages`, `vendor`, `build`,
+`dist`, `target`, and `out`. Apply this rule to the supplied directory itself
+and every descendant. An explicitly supplied matching file remains eligible
+even when its parent directory would be skipped during a directory scan.
+
 The user may provide `scan_path` as a Hermes Markdown memory file or directory path. If omitted, use the common Hermes locations above.
 
 ## Hard Rules
@@ -44,7 +52,14 @@ The user may provide `scan_path` as a Hermes Markdown memory file or directory p
   they persist.
 - Do not edit, quarantine, or delete memory files unless the user explicitly asks after seeing the final report.
 - Always write a final Markdown detail report before answering the user.
-- End every completed chat response with this exact marker on its own line: `=== SKILL EXECUTION COMPLETE: detect-recommendation-poisoning ===`
+- Put this exact marker on its own line only in the final chat response after the
+  entire scan task completes and the final Markdown report is written:
+  `=== SKILL EXECUTION COMPLETE: detect-recommendation-poisoning ===`. Do not
+  include it in consent requests, progress updates, blocker responses, failure
+  responses, or any other incomplete response. A scan with no matching files is
+  complete after its required no-files report is written. A switch from
+  external processing to local review is complete only after the local review
+  and its report finish.
 
 ## Workflow
 
@@ -59,7 +74,7 @@ The user may provide `scan_path` as a Hermes Markdown memory file or directory p
    - The final `Reviewed records` count must equal the total number of discovered Hermes memory records, not a candidate count.
 3. Read every matching file directly.
    - Split Hermes profile memory records on a standalone `§` line.
-   - If a file has no `§` separators, review blank-line-delimited paragraphs when practical; otherwise review the whole file as one record.
+   - If a file has no `§` separators, split it into blank-line-delimited non-empty blocks and treat each block as one record.
    - Preserve file path, record index, and line number or line range for evidence.
 4. Review every record sequentially and assign exactly one verdict before continuing:
    - `suspicious`: the record attempts commercial recommendation poisoning or
@@ -85,7 +100,8 @@ The user may provide `scan_path` as a Hermes Markdown memory file or directory p
 6. Answer in chat only after the Markdown report is written.
    - Include the report path, scanned file count, reviewed record count, verdict counts, and any blocker recorded in the report.
    - Do not add findings or recommendations that are not in the report.
-   - Put the completion marker on its own final line: `=== SKILL EXECUTION COMPLETE: detect-recommendation-poisoning ===`
+   - If a blocker or failure prevents completion, answer with the available report details but omit the completion marker.
+   - Only when the entire scan task is complete and the Markdown report has been written, put the completion marker on its own final line: `=== SKILL EXECUTION COMPLETE: detect-recommendation-poisoning ===`
 
 ## Review Guidance
 

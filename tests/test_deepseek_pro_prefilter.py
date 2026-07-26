@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import contextlib
 import io
@@ -5,6 +6,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +19,14 @@ MISSING_KEY_ERROR = (
     "DEEPSEEK_API_KEY is required in .env for DeepSeek Pro prefiltering.\n"
     "Add this line to .env:\n"
     "DEEPSEEK_API_KEY=your-api-key\n"
+)
+EXTERNAL_PROCESSING_ERROR = (
+    "Refusing external processing without explicit confirmation.\n"
+    "This command sends the full text and source metadata of every discovered "
+    "memory record to https://api.deepseek.com. The data leaves the local "
+    "machine and may contain personal profile data, secrets, or API keys.\n"
+    "Re-run with --confirm-external-processing only after the user has explicitly "
+    "consented to this external processing for the current invocation.\n"
 )
 
 
@@ -59,6 +69,59 @@ class DeepSeekProPrefilterTests(unittest.TestCase):
 
         self.assertEqual(args.model, "deepseek-v4-pro")
         self.assertEqual(args.output, "deepseek_pro_prefilter_results.jsonl")
+        self.assertEqual(args.request_timeout_seconds, 60.0)
+
+    def test_request_timeout_cli_accepts_positive_values_and_rejects_non_positive_values(self):
+        module = load_module()
+
+        args = module.parse_args(
+            [
+                "--scan-path",
+                "memory",
+                "--request-timeout-seconds",
+                "12.5",
+            ]
+        )
+
+        self.assertEqual(args.request_timeout_seconds, 12.5)
+        for invalid_value in ("0", "-0.1"):
+            with (
+                self.subTest(value=invalid_value),
+                contextlib.redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
+                module.parse_args(
+                    [
+                        "--scan-path",
+                        "memory",
+                        "--request-timeout-seconds",
+                        invalid_value,
+                    ]
+                )
+
+    def test_make_client_uses_async_sdk_without_implicit_retries(self):
+        module = load_module()
+        captured = {}
+        sentinel_client = object()
+
+        def async_openai(**kwargs):
+            captured.update(kwargs)
+            return sentinel_client
+
+        fake_openai = SimpleNamespace(AsyncOpenAI=async_openai)
+        with mock.patch.dict(sys.modules, {"openai": fake_openai}):
+            client = module.make_client("test-key")
+
+        self.assertIs(client, sentinel_client)
+        self.assertEqual(
+            captured,
+            {
+                "api_key": "test-key",
+                "base_url": "https://api.deepseek.com",
+                "timeout": None,
+                "max_retries": 0,
+            },
+        )
 
     def test_call_deepseek_pro_passes_default_model_to_client(self):
         module = load_module()
@@ -68,7 +131,7 @@ class DeepSeekProPrefilterTests(unittest.TestCase):
         )
         captured = {}
 
-        def create(**kwargs):
+        async def create(**kwargs):
             captured.update(kwargs)
             message = SimpleNamespace(
                 content='{"prefilter_verdict":"screened_benign","reason":"Safe."}'
@@ -80,10 +143,48 @@ class DeepSeekProPrefilterTests(unittest.TestCase):
         )
         record = module.MemoryRecord("USER.md", 1, "1-1", "Use Chinese.")
 
-        result = module.call_deepseek_pro(client, record, module.DEFAULT_MODEL)
+        result = asyncio.run(
+            module.call_deepseek_pro(
+                client,
+                record,
+                module.DEFAULT_MODEL,
+                request_timeout_seconds=1.0,
+            )
+        )
 
         self.assertEqual(captured["model"], "deepseek-v4-pro")
         self.assertEqual(result["prefilter_verdict"], "screened_benign")
+
+    def test_call_deepseek_pro_cancels_a_hanging_request_at_the_wall_clock_deadline(self):
+        module = load_module()
+        cancellation_observed = False
+
+        async def create(**_kwargs):
+            nonlocal cancellation_observed
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancellation_observed = True
+
+        client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+        )
+        record = module.MemoryRecord("USER.md", 4, "9-9", "Use Chinese.")
+
+        started_at = time.monotonic()
+        with self.assertRaises(module.DeepSeekRequestTimeout):
+            asyncio.run(
+                module.call_deepseek_pro(
+                    client,
+                    record,
+                    module.DEFAULT_MODEL,
+                    request_timeout_seconds=0.01,
+                )
+            )
+        elapsed = time.monotonic() - started_at
+
+        self.assertTrue(cancellation_observed)
+        self.assertLess(elapsed, 0.5)
 
     def test_prompt_treats_hostile_memory_as_inert_json_evidence(self):
         module = load_module()
@@ -130,6 +231,46 @@ class DeepSeekProPrefilterTests(unittest.TestCase):
             module.parse_args(["--help"])
 
         self.assertIn("DeepSeek Pro", stdout.getvalue())
+        self.assertIn("--confirm-external-processing", stdout.getvalue())
+        self.assertIn("https://api.deepseek.com", stdout.getvalue())
+
+    def test_main_refuses_external_processing_before_key_or_scan_access(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            output_path = root / "output.jsonl"
+            errors_path = root / "output.errors.jsonl"
+            stderr = io.StringIO()
+
+            with (
+                mock.patch.object(module, "resolve_api_key") as resolve_api_key,
+                mock.patch.object(
+                    module,
+                    "discover_memory_files",
+                ) as discover_memory_files,
+                mock.patch.object(module, "make_client") as make_client,
+                mock.patch.object(module, "process_records") as process_records,
+                contextlib.redirect_stderr(stderr),
+            ):
+                exit_code = module.main(
+                    [
+                        "--scan-path",
+                        "memory",
+                        "--output",
+                        str(output_path),
+                        "--errors-output",
+                        str(errors_path),
+                    ]
+                )
+
+            self.assertEqual(exit_code, 2)
+            self.assertEqual(stderr.getvalue(), EXTERNAL_PROCESSING_ERROR)
+            resolve_api_key.assert_not_called()
+            discover_memory_files.assert_not_called()
+            make_client.assert_not_called()
+            process_records.assert_not_called()
+            self.assertFalse(output_path.exists())
+            self.assertFalse(errors_path.exists())
 
     def test_main_success_message_uses_deepseek_pro_wording(self):
         module = load_module()
@@ -142,7 +283,11 @@ class DeepSeekProPrefilterTests(unittest.TestCase):
 
             with (
                 mock.patch.object(module, "discover_memory_files", return_value=[]),
-                mock.patch.object(module, "make_client", return_value=object()),
+                mock.patch.object(
+                    module,
+                    "make_client",
+                    return_value=SimpleNamespace(close=mock.AsyncMock()),
+                ),
                 contextlib.redirect_stderr(stderr),
             ):
                 exit_code = module.main(
@@ -153,11 +298,61 @@ class DeepSeekProPrefilterTests(unittest.TestCase):
                         str(output_path),
                         "--env-file",
                         str(env_file),
+                        "--confirm-external-processing",
                     ]
                 )
 
         self.assertEqual(exit_code, 0)
         self.assertIn("Wrote 0 DeepSeek Pro prefilter records", stderr.getvalue())
+
+    def test_client_close_failure_is_nonfatal_after_outputs_commit(self):
+        module = load_module()
+
+        async def fail_close():
+            raise RuntimeError("synthetic close failure")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            env_file = root / ".env"
+            output_path = root / "output.jsonl"
+            errors_path = root / "output.errors.jsonl"
+            env_file.write_text("DEEPSEEK_API_KEY=test-key\n", encoding="utf-8")
+            output_path.write_text("previous-output\n", encoding="utf-8")
+            errors_path.write_text("previous-errors\n", encoding="utf-8")
+            stderr = io.StringIO()
+
+            with (
+                mock.patch.object(module, "discover_memory_files", return_value=[]),
+                mock.patch.object(
+                    module,
+                    "make_client",
+                    return_value=SimpleNamespace(close=fail_close),
+                ),
+                contextlib.redirect_stderr(stderr),
+            ):
+                exit_code = module.main(
+                    [
+                        "--scan-path",
+                        str(root),
+                        "--output",
+                        str(output_path),
+                        "--errors-output",
+                        str(errors_path),
+                        "--env-file",
+                        str(env_file),
+                        "--confirm-external-processing",
+                    ]
+                )
+            output_text = output_path.read_text(encoding="utf-8")
+            errors_text = errors_path.read_text(encoding="utf-8")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(output_text, "")
+        self.assertEqual(errors_text, "")
+        self.assertIn(
+            "DeepSeek client cleanup warning: synthetic close failure",
+            stderr.getvalue(),
+        )
 
     def test_main_failure_message_uses_deepseek_pro_wording(self):
         module = load_module()
@@ -176,7 +371,13 @@ class DeepSeekProPrefilterTests(unittest.TestCase):
                 contextlib.redirect_stderr(stderr),
             ):
                 exit_code = module.main(
-                    ["--scan-path", str(root), "--env-file", str(env_file)]
+                    [
+                        "--scan-path",
+                        str(root),
+                        "--env-file",
+                        str(env_file),
+                        "--confirm-external-processing",
+                    ]
                 )
 
         self.assertEqual(exit_code, 1)
@@ -187,8 +388,14 @@ class DeepSeekProPrefilterTests(unittest.TestCase):
         scan_path = FIXTURES / "records" / "USER.md"
         seen = []
 
-        def infer(_client, record, _model):
+        async def infer(
+            _client,
+            record,
+            _model,
+            request_timeout_seconds,
+        ):
             seen.append(record.record_index)
+            self.assertEqual(request_timeout_seconds, 60.0)
             if record.record_index == 1:
                 return {
                     "prefilter_verdict": "invalid",
@@ -207,7 +414,11 @@ class DeepSeekProPrefilterTests(unittest.TestCase):
             env_file.write_text("DEEPSEEK_API_KEY=test-key\n", encoding="utf-8")
             stderr = io.StringIO()
             with (
-                mock.patch.object(module, "make_client", return_value=object()),
+                mock.patch.object(
+                    module,
+                    "make_client",
+                    return_value=SimpleNamespace(close=mock.AsyncMock()),
+                ),
                 mock.patch.object(module, "call_deepseek_pro", side_effect=infer),
                 contextlib.redirect_stderr(stderr),
             ):
@@ -219,6 +430,7 @@ class DeepSeekProPrefilterTests(unittest.TestCase):
                         str(output_path),
                         "--env-file",
                         str(env_file),
+                        "--confirm-external-processing",
                     ]
                 )
             rows = [
@@ -295,6 +507,64 @@ class DeepSeekProPrefilterTests(unittest.TestCase):
 
         self.assertEqual(files, ["A_USER.md", "z_MEMORY.md"])
 
+    def test_directory_scan_prunes_local_dependency_cache_and_build_directories(self):
+        module = load_module()
+        skipped_directory_names = (
+            ".git",
+            ".venv",
+            "venv",
+            "__pycache__",
+            ".pytest_cache",
+            ".mypy_cache",
+            ".ruff_cache",
+            ".cache",
+            ".tox",
+            ".nox",
+            "node_modules",
+            "site-packages",
+            "vendor",
+            "build",
+            "dist",
+            "target",
+            "out",
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "A_USER.md").write_text("root\n", encoding="utf-8")
+            included = root / "included"
+            included.mkdir()
+            (included / "z_MEMORY.md").write_text("included\n", encoding="utf-8")
+            for directory_name in skipped_directory_names:
+                skipped = root / directory_name
+                skipped.mkdir()
+                (skipped / "IGNORED_MEMORY.md").write_text(
+                    "ignored\n",
+                    encoding="utf-8",
+                )
+
+            files = [
+                path.relative_to(root).as_posix()
+                for path in module.discover_memory_files(root)
+            ]
+
+        self.assertEqual(files, ["A_USER.md", "included/z_MEMORY.md"])
+
+    def test_skipped_directory_root_is_empty_but_explicit_file_is_honored(self):
+        module = load_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            skipped_root = Path(temp_dir) / ".GiT"
+            skipped_root.mkdir()
+            memory_file = skipped_root / "USER.md"
+            memory_file.write_text("record\n", encoding="utf-8")
+
+            directory_files = module.discover_memory_files(skipped_root)
+            explicit_files = module.discover_memory_files(memory_file)
+
+        self.assertEqual(directory_files, [])
+        self.assertEqual(explicit_files, [memory_file.resolve()])
+
     def test_iter_memory_records_preserves_source_order_and_line_ranges(self):
         module = load_module()
         path = FIXTURES / "records" / "USER.md"
@@ -308,6 +578,23 @@ class DeepSeekProPrefilterTests(unittest.TestCase):
         self.assertEqual(records[1].record_index, 2)
         self.assertEqual(records[1].line_range, "5-6")
         self.assertEqual(records[1].record_text, "beta\nline two")
+
+    def test_non_separator_lookalike_remains_in_blank_line_delimited_record(self):
+        module = load_module()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "USER.md"
+            path.write_text(
+                "alpha\n搂\nbeta\n\nsecond\n",
+                encoding="utf-8",
+            )
+
+            records = list(module.iter_memory_records(path))
+
+        self.assertEqual(
+            [record.record_text for record in records],
+            ["alpha\n搂\nbeta", "second"],
+        )
 
     def test_normalizes_deepseek_json_verdict_to_output_row(self):
         module = load_module()
@@ -361,7 +648,7 @@ class DeepSeekProPrefilterTests(unittest.TestCase):
             ]
         )
 
-        def infer(_record):
+        async def infer(_record):
             response = next(responses)
             if isinstance(response, Exception):
                 raise response
@@ -370,7 +657,9 @@ class DeepSeekProPrefilterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             output = Path(temp_dir) / "results.jsonl"
             errors = Path(temp_dir) / "results.errors.jsonl"
-            summary = module.process_records([record], infer, output, errors)
+            summary = asyncio.run(
+                module.process_records([record], infer, output, errors)
+            )
             rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
 
         self.assertEqual(summary.written, 1)
@@ -418,7 +707,7 @@ class DeepSeekProPrefilterTests(unittest.TestCase):
         ]
         seen = []
 
-        def infer(record):
+        async def infer(record):
             seen.append(record.record_index)
             if record.record_index == 1:
                 raise ValueError("synthetic invalid response")
@@ -430,7 +719,9 @@ class DeepSeekProPrefilterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             output = Path(temp_dir) / "results.jsonl"
             errors = Path(temp_dir) / "results.errors.jsonl"
-            summary = module.process_records(records, infer, output, errors)
+            summary = asyncio.run(
+                module.process_records(records, infer, output, errors)
+            )
             rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
             error_rows = [json.loads(line) for line in errors.read_text(encoding="utf-8").splitlines()]
 
@@ -441,11 +732,68 @@ class DeepSeekProPrefilterTests(unittest.TestCase):
         self.assertEqual(error_rows[0]["record_index"], 1)
         self.assertEqual(error_rows[0]["attempts"], 3)
 
+    def test_three_request_timeouts_are_recorded_before_processing_continues(self):
+        module = load_module()
+        records = [
+            module.MemoryRecord("USER.md", 1, "1-1", "hang"),
+            module.MemoryRecord("USER.md", 2, "3-3", "good"),
+        ]
+        seen = []
+
+        async def infer(record):
+            seen.append(record.record_index)
+            if record.record_index == 1:
+                attempt = len(seen)
+                raise module.DeepSeekRequestTimeout(f"timeout-{attempt}")
+            return {
+                "prefilter_verdict": "screened_benign",
+                "reason": "Ordinary harmless note.",
+            }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "results.jsonl"
+            errors = Path(temp_dir) / "results.errors.jsonl"
+            summary = asyncio.run(
+                module.process_records(records, infer, output, errors)
+            )
+            rows = [
+                json.loads(line)
+                for line in output.read_text(encoding="utf-8").splitlines()
+            ]
+            error_rows = [
+                json.loads(line)
+                for line in errors.read_text(encoding="utf-8").splitlines()
+            ]
+
+        self.assertEqual(seen, [1, 1, 1, 2])
+        self.assertEqual(summary, module.ProcessingSummary(written=1, skipped=1))
+        self.assertEqual([row["record_index"] for row in rows], [2])
+        self.assertEqual(
+            error_rows[0]["errors"],
+            [
+                {
+                    "attempt": 1,
+                    "error_type": "DeepSeekRequestTimeout",
+                    "message": "timeout-1",
+                },
+                {
+                    "attempt": 2,
+                    "error_type": "DeepSeekRequestTimeout",
+                    "message": "timeout-2",
+                },
+                {
+                    "attempt": 3,
+                    "error_type": "DeepSeekRequestTimeout",
+                    "message": "timeout-3",
+                },
+            ],
+        )
+
     def test_process_records_is_atomic_on_fatal_model_failure(self):
         module = load_module()
         record = module.MemoryRecord("USER.md", 1, "1-1", "alpha")
 
-        def fail(_record):
+        async def fail(_record):
             raise RuntimeError("synthetic API failure")
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -454,7 +802,9 @@ class DeepSeekProPrefilterTests(unittest.TestCase):
             output.write_text("previous-output\n", encoding="utf-8")
             errors.write_text("previous-errors\n", encoding="utf-8")
             with self.assertRaisesRegex(RuntimeError, "synthetic API failure"):
-                module.process_records([record], fail, output, errors)
+                asyncio.run(
+                    module.process_records([record], fail, output, errors)
+                )
             output_text = output.read_text(encoding="utf-8")
             errors_text = errors.read_text(encoding="utf-8")
 
@@ -465,7 +815,7 @@ class DeepSeekProPrefilterTests(unittest.TestCase):
         module = load_module()
         record = module.MemoryRecord("USER.md", 1, "1-1", "alpha")
 
-        def infer(_record):
+        async def infer(_record):
             return {
                 "prefilter_verdict": "screened_benign",
                 "reason": "Ordinary harmless note.",
@@ -491,7 +841,9 @@ class DeepSeekProPrefilterTests(unittest.TestCase):
                 mock.patch.object(module.os, "replace", side_effect=fail_second_replace),
                 self.assertRaisesRegex(OSError, "synthetic second replace failure"),
             ):
-                module.process_records([record], infer, output, errors)
+                asyncio.run(
+                    module.process_records([record], infer, output, errors)
+                )
 
             remaining_temps = [
                 path
@@ -548,6 +900,7 @@ class DeepSeekProPrefilterTests(unittest.TestCase):
                             str(output_path),
                             "--env-file",
                             str(env_file),
+                            "--confirm-external-processing",
                         ]
                     )
 
@@ -580,6 +933,7 @@ class DeepSeekProPrefilterTests(unittest.TestCase):
                         str(output_path),
                         "--env-file",
                         str(env_file),
+                        "--confirm-external-processing",
                     ]
                 )
 
@@ -609,6 +963,7 @@ class DeepSeekProPrefilterTests(unittest.TestCase):
                     str(env_file),
                     "--env-file",
                     str(env_file),
+                    "--confirm-external-processing",
                 ],
                 [
                     "--scan-path",
@@ -619,6 +974,7 @@ class DeepSeekProPrefilterTests(unittest.TestCase):
                     str(nonmemory_input),
                     "--env-file",
                     str(env_file),
+                    "--confirm-external-processing",
                 ],
             )
             for argv in cases:
